@@ -53,6 +53,8 @@ class RecognizeOptions(TypedDict, total=False):
     """Output language (only for Canary models)."""
     pnc: Literal["pnc", "nopnc"] | bool
     """Output punctuation and capitalization (only for Canary models)."""
+    max_new_tokens: int
+    """Cap on tokens generated past the prompt (only for Whisper). Total length is also capped at 448."""
 
 
 class AsrAdapter(ABC, Generic[R]):

@@ -126,6 +126,14 @@ class WrongDataTypeError(AudioLoadingError):
         super().__init__("Waveform must be a path (str or Path), a float32 NumPy array, or a list of these.")
 
 
+class InvalidMaxNewTokensError(ValueError):
+    """``max_new_tokens`` must be a positive integer."""
+
+    def __init__(self, value: object) -> None:
+        """Create error."""
+        super().__init__(f"max_new_tokens must be a positive int, got {value!r}.")
+
+
 def read_wav(filename: str) -> tuple[npt.NDArray[np.float32], int]:
     """Read PCM wav file to Numpy array."""
     with wave.open(filename, mode="rb") as f:

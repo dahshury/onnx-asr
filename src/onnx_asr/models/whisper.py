@@ -13,7 +13,9 @@ from onnxruntime import OrtValue
 
 from onnx_asr.asr import BaseAsr, Preprocessor, TimestampedResult
 from onnx_asr.onnx import OnnxSessionOptions, TensorRtOptions, get_onnx_device
-from onnx_asr.utils import is_float32_array, is_int32_array
+from onnx_asr.utils import InvalidMaxNewTokensError, is_float32_array, is_int32_array
+
+WHISPER_DEFAULT_MAX_LENGTH = 448
 
 
 @typing.no_type_check
@@ -77,7 +79,10 @@ class _Whisper(BaseAsr):
 
     @abstractmethod
     def _decoding(
-        self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = WHISPER_DEFAULT_MAX_LENGTH,
     ) -> npt.NDArray[np.int64]: ...
 
     def _decode_tokens(self, tokens: npt.NDArray[np.int64]) -> TimestampedResult:
@@ -85,6 +90,15 @@ class _Whisper(BaseAsr):
         return TimestampedResult(
             bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
         )
+
+    def _resolve_max_length(self, prompt_len: int, kwargs: dict[str, object | None]) -> int:
+        """Map ``max_new_tokens`` to the total decoder ``max_length`` (prompt + generated)."""
+        max_new = kwargs.get("max_new_tokens")
+        if max_new is None:
+            return WHISPER_DEFAULT_MAX_LENGTH
+        if not isinstance(max_new, int) or max_new <= 0:
+            raise InvalidMaxNewTokensError(max_new)
+        return min(prompt_len + max_new, WHISPER_DEFAULT_MAX_LENGTH)
 
     def recognize_batch(
         self, waveforms: npt.NDArray[np.float32], waveforms_len: npt.NDArray[np.int64], /, **kwargs: object | None
@@ -99,7 +113,8 @@ class _Whisper(BaseAsr):
             input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
             input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
 
-        return map(self._decode_tokens, self._decoding(input_encoding, input_tokens))
+        max_length = self._resolve_max_length(input_tokens.shape[1], kwargs)
+        return map(self._decode_tokens, self._decoding(input_encoding, input_tokens, max_length))
 
 
 class WhisperOrt(_Whisper):
@@ -124,7 +139,10 @@ class WhisperOrt(_Whisper):
         return f"whisper{self.config.get('features_size', 80)}"
 
     def _decoding(
-        self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = WHISPER_DEFAULT_MAX_LENGTH,
     ) -> npt.NDArray[np.int64]:
         (sequences,) = self._model.run(
             ["sequences"],
@@ -213,7 +231,10 @@ class WhisperHf(_Whisper):
         }
 
     def _decoding(
-        self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = WHISPER_DEFAULT_MAX_LENGTH,
     ) -> npt.NDArray[np.int64]:
         state = self._create_state()
         for _ in range(tokens.shape[-1], max_length):
