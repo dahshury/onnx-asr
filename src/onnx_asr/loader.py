@@ -51,6 +51,13 @@ AsrNames = Literal[
     "alphacep/vosk-model-small-ru",
     "t-tech/t-one",
     "whisper-base",
+    "whisper-tiny",
+    "whisper-large-v3-turbo",
+    "distil-whisper-v3.5",
+    "lite-whisper-acc",
+    "whisper-base-timestamped",
+    "whisper-medium-en-timestamped",
+    "whisper-large-v3-timestamped",
 ]
 """Supported ASR model names (can be automatically downloaded from the Hugging Face)."""
 
@@ -105,6 +112,13 @@ def create_asr_resolver(
         "nemo-parakeet-tdt-0.6b-v3": NemoConformerTdt,
         "nemo-canary-1b-v2": NemoConformerAED,
         "whisper-base": WhisperOrt,
+        "whisper-tiny": WhisperHf,
+        "whisper-large-v3-turbo": WhisperHf,
+        "distil-whisper-v3.5": WhisperHf,
+        "lite-whisper-acc": WhisperHf,
+        "whisper-base-timestamped": WhisperHf,
+        "whisper-medium-en-timestamped": WhisperHf,
+        "whisper-large-v3-timestamped": WhisperHf,
         "kaldi-rnnt": KaldiTransducer,
         "nemo-conformer-ctc": NemoConformerCtc,
         "nemo-conformer-rnnt": NemoConformerRnnt,

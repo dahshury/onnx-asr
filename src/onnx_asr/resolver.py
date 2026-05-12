@@ -28,6 +28,13 @@ model_repos = {
     "nemo-parakeet-tdt-0.6b-v3": "istupakov/parakeet-tdt-0.6b-v3-onnx",
     "nemo-canary-1b-v2": "istupakov/canary-1b-v2-onnx",
     "whisper-base": "istupakov/whisper-base-onnx",
+    "whisper-tiny": "onnx-community/whisper-tiny",
+    "whisper-large-v3-turbo": "onnx-community/whisper-large-v3-turbo",
+    "distil-whisper-v3.5": "onnx-community/distil-large-v3.5-ONNX",
+    "lite-whisper-acc": "onnx-community/lite-whisper-large-v3-acc-ONNX",
+    "whisper-base-timestamped": "onnx-community/whisper-base_timestamped",
+    "whisper-medium-en-timestamped": "onnx-community/whisper-medium.en_timestamped",
+    "whisper-large-v3-timestamped": "onnx-community/whisper-large-v3_timestamped",
     "silero": "istupakov/silero-vad-onnx",
 }
 
