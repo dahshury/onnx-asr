@@ -53,6 +53,8 @@ class RecognizeOptions(TypedDict, total=False):
     """Output language (only for Canary models)."""
     pnc: Literal["pnc", "nopnc"] | bool
     """Output punctuation and capitalization (only for Canary models)."""
+    return_timestamps: bool
+    """Emit segment timestamps (only for Whisper models). Sets ``TimestampedResult.segments``."""
 
 
 class AsrAdapter(ABC, Generic[R]):

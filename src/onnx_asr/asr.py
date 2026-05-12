@@ -29,6 +29,8 @@ class TimestampedResult:
     """Tokens list."""
     logprobs: list[float] | None = None
     """Tokens logprob list."""
+    segments: list[tuple[float, float, str]] | None = None
+    """For Whisper with ``return_timestamps=True``: ``(start_s, end_s, text)`` per segment."""
 
 
 class AsrConfig(TypedDict, total=False):

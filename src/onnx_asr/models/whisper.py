@@ -62,6 +62,21 @@ class _Whisper(BaseAsr):
             dtype=np.int64,
         )
         self._detect_lang_input = np.array([[self._bos_token_id]], dtype=np.int64)
+        # Timestamp tokens occupy a contiguous range starting at ``<|0.00|>`` with a 0.02 s step.
+        # When ``return_timestamps=True`` we drop ``<|notimestamps|>`` from the prompt so the
+        # decoder can emit segment timestamp tokens.
+        self._timestamp_begin_id: int | None = self._tokens.get("<|0.00|>")
+        self._timestamp_step_s = 0.02
+        self._transcribe_input_with_timestamps = np.array(
+            [
+                [
+                    self._bos_token_id,
+                    self._eos_token_id,
+                    self._tokens["<|transcribe|>"],
+                ]
+            ],
+            dtype=np.int64,
+        )
 
     @staticmethod
     def _get_excluded_providers() -> list[str]:
@@ -80,17 +95,58 @@ class _Whisper(BaseAsr):
         self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
     ) -> npt.NDArray[np.int64]: ...
 
+    def _decode_text(self, tokens: npt.NDArray[np.int64] | list[int]) -> str:
+        text = "".join(token for id in tokens if (token := self._vocab[int(id)]) and not token.startswith("<|"))
+        return bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
+
     def _decode_tokens(self, tokens: npt.NDArray[np.int64]) -> TimestampedResult:
-        text = "".join(token for id in tokens if (token := self._vocab[id]) and not token.startswith("<|"))
-        return TimestampedResult(
-            bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
-        )
+        return TimestampedResult(self._decode_text(tokens))
+
+    def _extract_segments(self, tokens: npt.NDArray[np.int64]) -> list[tuple[float, float, str]]:
+        """Parse the Whisper timestamp token stream into ``(start_s, end_s, text)`` segments.
+
+        Whisper emits paired ``<|t|>`` timestamp tokens around each segment::
+
+            <|0.00|> hello world <|2.34|> <|2.34|> how are you <|4.56|>
+
+        Tokens with id ``>= _timestamp_begin_id`` are treated as timestamp markers; the time in
+        seconds is ``(id - _timestamp_begin_id) * 0.02``. Unpaired or empty segments are skipped.
+        """
+        if self._timestamp_begin_id is None:
+            return []
+
+        begin_id = self._timestamp_begin_id
+        step = self._timestamp_step_s
+        segments: list[tuple[float, float, str]] = []
+        i = 0
+        # Skip prompt prefix (BOS/lang/transcribe) — handled by caller passing only generated output.
+        while i < len(tokens):
+            tok = int(tokens[i])
+            if tok < begin_id:
+                i += 1
+                continue
+            start = (tok - begin_id) * step
+            j = i + 1
+            while j < len(tokens) and int(tokens[j]) < begin_id:
+                if int(tokens[j]) == self._eos_token_id:
+                    break
+                j += 1
+            if j >= len(tokens) or int(tokens[j]) < begin_id:
+                break
+            end = (int(tokens[j]) - begin_id) * step
+            text = self._decode_text(tokens[i + 1 : j])
+            if text:
+                segments.append((start, end, text.strip()))
+            i = j + 1
+        return segments
 
     def recognize_batch(
         self, waveforms: npt.NDArray[np.float32], waveforms_len: npt.NDArray[np.int64], /, **kwargs: object | None
     ) -> Iterator[TimestampedResult]:
         input_encoding = self._encode(waveforms, waveforms_len)
-        input_tokens = np.repeat(self._transcribe_input, len(waveforms), axis=0)
+        return_timestamps = bool(kwargs.get("return_timestamps"))
+        prompt = self._transcribe_input_with_timestamps if return_timestamps else self._transcribe_input
+        input_tokens = np.repeat(prompt, len(waveforms), axis=0)
 
         language = kwargs.get("language")
         if language:
@@ -99,7 +155,11 @@ class _Whisper(BaseAsr):
             input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
             input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
 
-        return map(self._decode_tokens, self._decoding(input_encoding, input_tokens))
+        decoded = self._decoding(input_encoding, input_tokens)
+        for row in decoded:
+            text = self._decode_text(row)
+            segments = self._extract_segments(row) if return_timestamps else None
+            yield TimestampedResult(text=text, segments=segments)
 
 
 class WhisperOrt(_Whisper):
