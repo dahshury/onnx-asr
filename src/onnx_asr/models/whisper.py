@@ -1,17 +1,20 @@
 """Whisper model implementations."""
 
+from __future__ import annotations
+
 import json
 import typing
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import numpy.typing as npt
 import onnxruntime as rt
 from onnxruntime import OrtValue
 
-from onnx_asr.asr import BaseAsr, Preprocessor, TimestampedResult
+from onnx_asr.asr import BaseAsr, ModelCapabilities, Preprocessor, StreamingResult, TimestampedResult
 from onnx_asr.onnx import OnnxSessionOptions, TensorRtOptions, get_onnx_device
 from onnx_asr.utils import is_float32_array, is_int32_array
 
@@ -32,6 +35,11 @@ def bytes_to_unicode() -> dict[int, str]:
 
 
 class _Whisper(BaseAsr):
+    capabilities: ClassVar[ModelCapabilities] = ModelCapabilities(
+        streaming_native=True,
+        is_multilingual=True,
+    )
+
     def __init__(
         self,
         model_files: dict[str, Path],
@@ -100,6 +108,179 @@ class _Whisper(BaseAsr):
             input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
 
         return map(self._decode_tokens, self._decoding(input_encoding, input_tokens))
+
+    def _transcribe_single(
+        self, waveform: npt.NDArray[np.float32], *, language: str | None = None
+    ) -> tuple[npt.NDArray[np.int64], str]:
+        """Run one full decode on a single audio array. Returns (raw_token_ids, decoded_text).
+
+        Internal helper for streaming wrappers that need both the integer
+        token sequence (for LCP / commit policies) and the rendered text.
+        """
+        wf = waveform.reshape(1, -1).astype(np.float32, copy=False)
+        wf_len = np.array([wf.shape[1]], dtype=np.int64)
+
+        input_encoding = self._encode(wf, wf_len)
+        input_tokens = np.repeat(self._transcribe_input, 1, axis=0)
+        if language:
+            input_tokens[:, 1] = self._tokens[f"<|{language}|>"]
+        else:
+            input_tokens_detect_lang = np.repeat(self._detect_lang_input, 1, axis=0)
+            input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
+
+        output = self._decoding(input_encoding, input_tokens)
+        token_ids = output[0]
+        text = self._decode_tokens(token_ids).text
+        return token_ids, text
+
+    def create_stream(
+        self,
+        *,
+        sample_rate: int = 16_000,
+        min_chunk_size_s: float = 1.0,
+        language: str | None = None,
+    ) -> WhisperStream:
+        """Open a LocalAgreement-2 streaming session over this Whisper instance.
+
+        See :class:`WhisperStream` for the algorithm. The returned object
+        satisfies the :class:`~onnx_asr.asr.AsrStream` protocol.
+        """
+        return WhisperStream(
+            self,
+            sample_rate=sample_rate,
+            min_chunk_size_s=min_chunk_size_s,
+            language=language,
+        )
+
+
+class WhisperStream:
+    """LocalAgreement-2 streaming wrapper around a Whisper model.
+
+    The classic UFAL whisper_streaming policy, ONNX-friendly. Each ``step()``:
+
+    1. Re-decode the whole audio buffer with the underlying greedy decoder.
+    2. Compute the longest common prefix (token-level, integer IDs) of the new
+       token sequence against the previous step's sequence.
+    3. Any token at a prefix position that matches across two consecutive
+       decodes is considered **committed** — it won't change in future
+       snapshots — and goes into ``StreamingResult.committed_text``.
+    4. The full decoded text goes into ``StreamingResult.text`` so callers
+       can render the live preview that may still be revised.
+
+    On ``finish()``, the next ``step()`` commits everything (every token
+    becomes committed) and the snapshot has ``is_partial=False`` and
+    ``is_endpoint=True``.
+
+    Bounded compute (audio-buffer trim at committed segment boundary) is
+    deferred — depends on Whisper segment-timestamp extraction (`<|t|>`
+    tokens, plan item #5). Until that lands, the buffer grows over the
+    course of an utterance; the caller should call ``reset()`` on VAD
+    endpoint to drop it.
+    """
+
+    def __init__(
+        self,
+        asr: _Whisper,
+        *,
+        sample_rate: int = 16_000,
+        min_chunk_size_s: float = 1.0,
+        language: str | None = None,
+    ) -> None:
+        """Bind the stream to ``asr``. See :meth:`_Whisper.create_stream` for kwargs."""
+        self._asr = asr
+        self._sample_rate = sample_rate
+        self._min_chunk_samples = max(1, int(min_chunk_size_s * sample_rate))
+        self._language = language
+        self._buffer: npt.NDArray[np.float32] = np.empty(0, dtype=np.float32)
+        self._prev_token_ids: list[int] = []
+        self._committed_count = 0
+        self._finished = False
+        self._endpoint = False
+        self._segment_id = 0
+
+    def push_audio(self, samples: npt.NDArray[np.float32], sample_rate: int = 16_000) -> None:
+        """Append PCM samples to the input buffer."""
+        if sample_rate != self._sample_rate:
+            msg = f"WhisperStream sample_rate mismatch: expected {self._sample_rate}, got {sample_rate}"
+            raise ValueError(msg)
+        flat = np.asarray(samples, dtype=np.float32).ravel()
+        self._buffer = np.concatenate([self._buffer, flat])
+
+    def finish(self) -> None:
+        """Mark the input as closed. Next ``step()`` commits everything."""
+        self._finished = True
+
+    def is_ready(self) -> bool:
+        """Return True once buffer has enough audio for a meaningful decode."""
+        if self._buffer.size == 0:
+            return False
+        if self._finished:
+            return True
+        return self._buffer.size >= self._min_chunk_samples
+
+    def step(self) -> StreamingResult | None:
+        """Re-decode, update commit prefix via LocalAgreement-2, return snapshot."""
+        if not self.is_ready():
+            return None
+
+        token_ids, text = self._asr._transcribe_single(self._buffer, language=self._language)
+        token_ids_list = [int(t) for t in token_ids]
+
+        if self._finished:
+            self._committed_count = len(token_ids_list)
+            self._endpoint = True
+        else:
+            lcp = self._longest_common_prefix(token_ids_list, self._prev_token_ids)
+            # Committed count grows monotonically — never shrink even if a later
+            # decode briefly disagrees with itself at the boundary.
+            self._committed_count = max(self._committed_count, min(lcp, len(token_ids_list)))
+
+        committed_ids = token_ids_list[: self._committed_count]
+        committed_text = (
+            self._asr._decode_tokens(np.asarray(committed_ids, dtype=np.int64)).text if committed_ids else ""
+        )
+        token_strs = [
+            self._asr._vocab[tid] for tid in token_ids_list if not self._asr._vocab.get(tid, "").startswith("<|")
+        ]
+
+        self._prev_token_ids = token_ids_list
+
+        return StreamingResult(
+            text=text,
+            tokens=token_strs,
+            timestamps=None,
+            is_partial=not self._finished,
+            segment_id=self._segment_id,
+            committed_text=committed_text,
+        )
+
+    def reset(self, *, keep_audio: bool = False) -> None:
+        """Zero decode state; bump segment id. Drops audio buffer unless ``keep_audio=True``."""
+        if not keep_audio:
+            self._buffer = np.empty(0, dtype=np.float32)
+        self._prev_token_ids = []
+        self._committed_count = 0
+        self._finished = False
+        self._endpoint = False
+        self._segment_id += 1
+
+    @property
+    def is_endpoint(self) -> bool:
+        """Whether the last ``step()`` produced the final/committed snapshot."""
+        return self._endpoint
+
+    @property
+    def buffered_samples(self) -> int:
+        """Current buffer size in samples."""
+        return int(self._buffer.size)
+
+    @staticmethod
+    def _longest_common_prefix(a: list[int], b: list[int]) -> int:
+        n = min(len(a), len(b))
+        for i in range(n):
+            if a[i] != b[i]:
+                return i
+        return n
 
 
 class WhisperOrt(_Whisper):

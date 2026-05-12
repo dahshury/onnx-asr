@@ -57,10 +57,15 @@ class ModelCapabilities:
 
 @dataclass(frozen=True)
 class StreamingResult:
-    """Snapshot of stream state after one decode step."""
+    """Snapshot of stream state after one decode step.
+
+    Streams that use a stability policy (LocalAgreement-2 for Whisper, etc.)
+    populate ``committed_text`` with the prefix that won't change in future
+    snapshots. Streams without a stability policy leave it as ``""``.
+    """
 
     text: str
-    """Concatenated text emitted in this snapshot."""
+    """Concatenated text emitted in this snapshot (committed + preview)."""
     tokens: list[str]
     """Tokens corresponding to ``text``."""
     timestamps: list[float] | None
@@ -69,6 +74,8 @@ class StreamingResult:
     """True for live preview; False once the segment is committed/final."""
     segment_id: int
     """Increments each time the stream advances past a VAD endpoint."""
+    committed_text: str = ""
+    """Stable prefix that successive snapshots are guaranteed not to revise."""
 
 
 @runtime_checkable

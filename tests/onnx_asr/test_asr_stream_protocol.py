@@ -152,21 +152,19 @@ def test_fake_stream_reset_keep_audio() -> None:
 
 def test_non_streaming_model_raises_clearly() -> None:
     """A model that doesn't override ``create_stream()`` raises ``StreamingNotSupportedError`` with the model name."""
-    model = onnx_asr.load_model("whisper-base", quantization="int8")
+    model = onnx_asr.load_model("alphacep/vosk-model-small-ru", quantization="int8")
     inner = model.asr if hasattr(model, "asr") else model
     assert isinstance(inner, object)
 
     with pytest.raises(StreamingNotSupportedError) as excinfo:
         inner.create_stream()  # type: ignore[attr-defined]
-    assert "WhisperOrt" in str(excinfo.value)
     assert "capabilities" in str(excinfo.value)
 
 
 def test_default_model_capabilities_on_loaded_model() -> None:
-    """Loaded models inherit the all-false defaults until their classes set ``capabilities`` explicitly."""
-    model: TextResultsAsrAdapter = onnx_asr.load_model("whisper-base", quantization="int8")
+    """A model that doesn't explicitly set capabilities inherits the all-false defaults."""
+    model: TextResultsAsrAdapter = onnx_asr.load_model("alphacep/vosk-model-small-ru", quantization="int8")
     inner = model.asr
     caps = inner.capabilities  # type: ignore[attr-defined]
     assert isinstance(caps, ModelCapabilities)
-    # Defaults: streaming not yet wired for any concrete class on this branch.
     assert caps.streaming_native is False
