@@ -114,6 +114,14 @@ def create_asr_resolver(
         "vosk": KaldiTransducer,
         "whisper-ort": WhisperOrt,
         "whisper": WhisperHf,
+        # ``model_type`` values reported in ``config.json`` for HF Optimum-style
+        # exports that are structurally Whisper-compatible (encoder_model.onnx +
+        # decoder_model_merged.onnx + vocab.json + added_tokens.json). The
+        # encoder internals differ (Lite-Whisper factorizes linear layers,
+        # Distil-Whisper distills decoder layers, timestamped variants alter
+        # the suppression mask) but the I/O contract is the same.
+        "lite-whisper": WhisperHf,
+        "distil-whisper": WhisperHf,
         "alphacep/vosk-model-ru": KaldiTransducer,
         "alphacep/vosk-model-small-ru": KaldiTransducer,
         "t-tech/t-one": TOneCtc,
