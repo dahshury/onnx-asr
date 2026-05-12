@@ -6,13 +6,13 @@ from abc import abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generic, Literal, Protocol, TypedDict, TypeVar
+from typing import ClassVar, Generic, Literal, Protocol, TypedDict, TypeVar, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
 
 from onnx_asr.onnx import OnnxSessionOptions, TensorRtOptions
-from onnx_asr.utils import log_softmax
+from onnx_asr.utils import StreamingNotSupportedError, log_softmax
 
 S = TypeVar("S")
 
@@ -29,6 +29,83 @@ class TimestampedResult:
     """Tokens list."""
     logprobs: list[float] | None = None
     """Tokens logprob list."""
+
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    """Per-model capability metadata.
+
+    Used by callers (e.g. a server orchestrator) to route between models
+    without inspecting concrete classes. Models override the class-level
+    ``capabilities`` constant; the defaults here describe a plain offline
+    batch ASR with no streaming, no timestamps, and no decode-time knobs.
+    """
+
+    streaming_native: bool = False
+    """Model supports stateful streaming via ``create_stream()`` (cache-aware encoder + persistent decoder state)."""
+    supports_timestamps: bool = False
+    """Model emits segment timestamps in ``recognize()`` output."""
+    supports_word_timestamps: bool = False
+    """Model can produce word-level timestamps (typically via cross-attention DTW)."""
+    supports_beam_search: bool = False
+    """Model honors the ``beam_size`` decode option."""
+    supports_temperature_fallback: bool = False
+    """Model honors the temperature ladder + quality guards."""
+    is_multilingual: bool = False
+    """Model handles multiple languages (vs. English-only)."""
+
+
+@dataclass(frozen=True)
+class StreamingResult:
+    """Snapshot of stream state after one decode step."""
+
+    text: str
+    """Concatenated text emitted in this snapshot."""
+    tokens: list[str]
+    """Tokens corresponding to ``text``."""
+    timestamps: list[float] | None
+    """Per-token timestamps if the model supports them."""
+    is_partial: bool
+    """True for live preview; False once the segment is committed/final."""
+    segment_id: int
+    """Increments each time the stream advances past a VAD endpoint."""
+
+
+@runtime_checkable
+class AsrStream(Protocol):
+    """Streaming ASR session protocol.
+
+    The shape follows sherpa-onnx's ``OnlineStream`` / ``OnlineRecognizer``
+    pair: producers ``push_audio()`` PCM samples and call ``finish()`` when
+    the source closes; consumers poll ``is_ready()`` then call ``step()`` to
+    advance one chunk. ``reset()`` zeros predictor state (and optionally the
+    buffered audio) so the same stream object can serve multiple utterances.
+    """
+
+    def push_audio(self, samples: npt.NDArray[np.float32], sample_rate: int = 16_000) -> None:
+        """Append PCM samples to the stream's input buffer."""
+        ...
+
+    def finish(self) -> None:
+        """Mark the input as complete. After this, ``step()`` drains residual buffer."""
+        ...
+
+    def is_ready(self) -> bool:
+        """Return True when at least one decode step's worth of audio is buffered."""
+        ...
+
+    def step(self) -> StreamingResult | None:
+        """Consume one chunk from the buffer and return a snapshot, or None if not yet ready."""
+        ...
+
+    def reset(self, *, keep_audio: bool = False) -> None:
+        """Zero decoder state. By default also drops the buffered audio."""
+        ...
+
+    @property
+    def is_endpoint(self) -> bool:
+        """Whether an endpoint (e.g. trailing silence) was detected on the last step."""
+        ...
 
 
 class AsrConfig(TypedDict, total=False):
@@ -54,6 +131,8 @@ class Preprocessor(Protocol):
 class Asr(Protocol):
     """ASR protocol."""
 
+    capabilities: ClassVar[ModelCapabilities]
+
     @staticmethod
     def _get_sample_rate() -> Literal[8_000, 16_000]:
         return 16_000
@@ -64,9 +143,19 @@ class Asr(Protocol):
         """Recognize waveforms batch."""
         ...
 
+    def create_stream(self) -> AsrStream:
+        """Open a streaming session.
+
+        Raises ``StreamingNotSupportedError`` unless the model overrides this and
+        sets ``capabilities.streaming_native = True``.
+        """
+        ...
+
 
 class BaseAsr(Asr):
     """Base ASR class."""
+
+    capabilities: ClassVar[ModelCapabilities] = ModelCapabilities()
 
     def __init__(
         self,
@@ -103,6 +192,14 @@ class BaseAsr(Asr):
     @property
     @abstractmethod
     def _preprocessor_name(self) -> str: ...
+
+    def create_stream(self) -> AsrStream:
+        """Open a streaming session. Default raises ``StreamingNotSupportedError``.
+
+        Models that support streaming override this AND set
+        ``capabilities = ModelCapabilities(streaming_native=True, ...)``.
+        """
+        raise StreamingNotSupportedError(type(self).__name__)
 
 
 class _AsrWithDecoding(BaseAsr):
