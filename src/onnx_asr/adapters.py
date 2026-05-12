@@ -53,6 +53,10 @@ class RecognizeOptions(TypedDict, total=False):
     """Output language (only for Canary models)."""
     pnc: Literal["pnc", "nopnc"] | bool
     """Output punctuation and capitalization (only for Canary models)."""
+    beam_size: int
+    """Beam search width (only for Whisper models). 1 = greedy (default), 5 = OpenAI Whisper default."""
+    length_penalty: float
+    """Length penalty for beam search (only for Whisper models). 1.0 is neutral; <1 favors short, >1 favors long."""
 
 
 class AsrAdapter(ABC, Generic[R]):
