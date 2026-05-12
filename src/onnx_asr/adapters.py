@@ -53,6 +53,8 @@ class RecognizeOptions(TypedDict, total=False):
     """Output language (only for Canary models)."""
     pnc: Literal["pnc", "nopnc"] | bool
     """Output punctuation and capitalization (only for Canary models)."""
+    initial_prompt: str | list[int] | None
+    """Domain-vocabulary / prior-context seed for Whisper. str = encoded via local BPE (best-effort)."""
 
 
 class AsrAdapter(ABC, Generic[R]):

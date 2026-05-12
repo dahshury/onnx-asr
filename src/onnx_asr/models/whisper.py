@@ -62,6 +62,9 @@ class _Whisper(BaseAsr):
             dtype=np.int64,
         )
         self._detect_lang_input = np.array([[self._bos_token_id]], dtype=np.int64)
+        # ``<|startofprev|>`` opens the optional initial-prompt slot.
+        self._sot_prev_token_id: int | None = self._tokens.get("<|startofprev|>")
+        self._bytes_to_unicode = bytes_to_unicode()
 
     @staticmethod
     def _get_excluded_providers() -> list[str]:
@@ -86,6 +89,49 @@ class _Whisper(BaseAsr):
             bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
         )
 
+    def _encode_prompt(self, prompt: str | list[int]) -> list[int]:
+        """Encode prompt text or pre-tokenized IDs into integer token IDs.
+
+        For ``list[int]`` input, returns as-is. For ``str`` input, applies a
+        greedy longest-match over the GPT-2-style BPE vocab using the
+        ``bytes_to_unicode`` mapping. This isn't full BPE (no merge rules), so
+        the encoding is sub-optimal for long prompts — callers wanting perfect
+        BPE should pre-tokenize externally (``tokenizers``/``tiktoken``) and
+        pass the resulting ``list[int]``.
+        """
+        if isinstance(prompt, list):
+            return [int(x) for x in prompt]
+        text = prompt if prompt.startswith(" ") else " " + prompt
+        encoded = "".join(self._bytes_to_unicode[b] for b in text.encode("utf-8"))
+        ids: list[int] = []
+        i = 0
+        max_merge = 16
+        while i < len(encoded):
+            for length in range(min(len(encoded) - i, max_merge), 0, -1):
+                candidate = encoded[i : i + length]
+                if candidate in self._tokens:
+                    ids.append(self._tokens[candidate])
+                    i += length
+                    break
+            else:
+                i += 1  # skip unknown char
+        return ids
+
+    def _prepend_prompt(
+        self, input_tokens: npt.NDArray[np.int64], prompt_ids: list[int]
+    ) -> tuple[npt.NDArray[np.int64], int]:
+        """Prepend ``<|startofprev|> + prompt`` to ``input_tokens``. Returns (new_tokens, prefix_len)."""
+        if self._sot_prev_token_id is None or not prompt_ids:
+            return input_tokens, 0
+        # Whisper's prompt window: n_ctx//2 - 1 = 223 tokens.
+        max_prompt = 223
+        if len(prompt_ids) > max_prompt:
+            prompt_ids = prompt_ids[-max_prompt:]
+        prefix = np.array([self._sot_prev_token_id, *prompt_ids], dtype=np.int64)
+        batch = input_tokens.shape[0]
+        prefix_batch = np.repeat(prefix[None, :], batch, axis=0)
+        return np.hstack([prefix_batch, input_tokens]), prefix.size
+
     def recognize_batch(
         self, waveforms: npt.NDArray[np.float32], waveforms_len: npt.NDArray[np.int64], /, **kwargs: object | None
     ) -> Iterator[TimestampedResult]:
@@ -99,7 +145,17 @@ class _Whisper(BaseAsr):
             input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
             input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
 
-        return map(self._decode_tokens, self._decoding(input_encoding, input_tokens))
+        # Optional initial_prompt — domain-vocab / context seeded into the decoder.
+        prompt_raw = kwargs.get("initial_prompt")
+        prefix_len = 0
+        if isinstance(prompt_raw, (str, list)) and prompt_raw:
+            prompt_ids = self._encode_prompt(prompt_raw)
+            input_tokens, prefix_len = self._prepend_prompt(input_tokens, prompt_ids)
+
+        output = self._decoding(input_encoding, input_tokens)
+        if prefix_len:
+            output = output[:, prefix_len:]
+        return map(self._decode_tokens, output)
 
 
 class WhisperOrt(_Whisper):
