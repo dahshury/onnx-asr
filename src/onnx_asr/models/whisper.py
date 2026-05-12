@@ -13,7 +13,7 @@ from onnxruntime import OrtValue
 
 from onnx_asr.asr import BaseAsr, Preprocessor, TimestampedResult
 from onnx_asr.onnx import OnnxSessionOptions, TensorRtOptions, get_onnx_device
-from onnx_asr.utils import is_float32_array, is_int32_array
+from onnx_asr.utils import InvalidTaskError, TaskNotSupportedError, is_float32_array, is_int32_array
 
 
 @typing.no_type_check
@@ -91,6 +91,14 @@ class _Whisper(BaseAsr):
     ) -> Iterator[TimestampedResult]:
         input_encoding = self._encode(waveforms, waveforms_len)
         input_tokens = np.repeat(self._transcribe_input, len(waveforms), axis=0)
+
+        task = kwargs.get("task", "transcribe")
+        if task not in ("transcribe", "translate"):
+            raise InvalidTaskError(task)
+        task_token = f"<|{task}|>"
+        if task_token not in self._tokens:
+            raise TaskNotSupportedError(task)
+        input_tokens[:, 2] = self._tokens[task_token]
 
         language = kwargs.get("language")
         if language:

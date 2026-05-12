@@ -53,6 +53,8 @@ class RecognizeOptions(TypedDict, total=False):
     """Output language (only for Canary models)."""
     pnc: Literal["pnc", "nopnc"] | bool
     """Output punctuation and capitalization (only for Canary models)."""
+    task: Literal["transcribe", "translate"]
+    """Whisper decode task — ``transcribe`` (default) emits the source language, ``translate`` emits English."""
 
 
 class AsrAdapter(ABC, Generic[R]):

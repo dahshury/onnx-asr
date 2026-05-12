@@ -126,6 +126,22 @@ class WrongDataTypeError(AudioLoadingError):
         super().__init__("Waveform must be a path (str or Path), a float32 NumPy array, or a list of these.")
 
 
+class InvalidTaskError(ValueError):
+    """Invalid Whisper task error (must be ``transcribe`` or ``translate``)."""
+
+    def __init__(self, task: object) -> None:
+        """Create error."""
+        super().__init__(f"task must be 'transcribe' or 'translate', got {task!r}.")
+
+
+class TaskNotSupportedError(ValueError):
+    """Whisper task not supported by this model (missing task token in vocab)."""
+
+    def __init__(self, task: str) -> None:
+        """Create error."""
+        super().__init__(f"Model does not support task={task!r} (token <|{task}|> not in vocab).")
+
+
 def read_wav(filename: str) -> tuple[npt.NDArray[np.float32], int]:
     """Read PCM wav file to Numpy array."""
     with wave.open(filename, mode="rb") as f:
