@@ -1,9 +1,11 @@
 """Resolver for ASR and VAD models."""
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Generic, Protocol, TypeVar
 
+from onnx_asr.progress import ProgressCallback, hf_progress_patch
 from onnx_asr.utils import (
     InvalidModelTypeInConfigError,
     ModelFileNotFoundError,
@@ -54,8 +56,11 @@ class Resolver(Generic[T]):
         local_dir: str | Path | None = None,
         *,
         offline: bool | None = None,
+        progress_callback: ProgressCallback | None = None,
     ):
         """Create model loader."""
+        self.progress_callback = progress_callback
+
         if model is not None:
             if "/" in model:
                 self.repo_id = model
@@ -114,11 +119,20 @@ class Resolver(Generic[T]):
         ]
 
         assert self.repo_id is not None
-        return Path(
-            snapshot_download(
-                self.repo_id, local_dir=self.local_dir, local_files_only=local_files_only, allow_patterns=files
-            )  # nosec
+        patch_ctx = (
+            hf_progress_patch(self.progress_callback)
+            if self.progress_callback is not None
+            else contextlib.nullcontext()
         )
+        with patch_ctx:
+            return Path(
+                snapshot_download(  # nosec
+                    self.repo_id,
+                    local_dir=self.local_dir,
+                    local_files_only=local_files_only,
+                    allow_patterns=files,
+                )
+            )
 
     def _resolve_model_files(self, path: Path, quantization: str | None) -> dict[str, Path]:
         files = self.model_type._get_model_files(quantization)

@@ -26,6 +26,7 @@ from onnx_asr.preprocessors.numpy_preprocessor import (
 )
 from onnx_asr.preprocessors.preprocessor import ConcurrentPreprocessor, IdentityPreprocessor, OnnxPreprocessor
 from onnx_asr.preprocessors.resampler import Resampler
+from onnx_asr.progress import ProgressCallback
 from onnx_asr.resolver import Resolver
 from onnx_asr.se import SpeakerEmbedding
 from onnx_asr.utils import (
@@ -87,7 +88,11 @@ AsrTypes: TypeAlias = (
 
 
 def create_asr_resolver(
-    model: str | None = None, local_dir: str | Path | None = None, *, offline: bool | None = None
+    model: str | None = None,
+    local_dir: str | Path | None = None,
+    *,
+    offline: bool | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Resolver[AsrTypes]:
     """Create resolver for ASR models."""
     model_types: dict[str, type[AsrTypes]] = {
@@ -118,28 +123,36 @@ def create_asr_resolver(
         "alphacep/vosk-model-small-ru": KaldiTransducer,
         "t-tech/t-one": TOneCtc,
     }
-    return Resolver(model_types, model, local_dir, offline=offline)
+    return Resolver(model_types, model, local_dir, offline=offline, progress_callback=progress_callback)
 
 
 VadTypes: TypeAlias = SileroVad | PyAnnoteVad
 
 
 def create_vad_resolver(
-    model: str | None = None, local_dir: str | Path | None = None, *, offline: bool | None = None
+    model: str | None = None,
+    local_dir: str | Path | None = None,
+    *,
+    offline: bool | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Resolver[VadTypes]:
     """Create resolver for VAD models."""
     model_types: dict[str, type[VadTypes]] = {
         "silero": SileroVad,
         "pyannote": PyAnnoteVad,
     }
-    return Resolver(model_types, model, local_dir, offline=offline)
+    return Resolver(model_types, model, local_dir, offline=offline, progress_callback=progress_callback)
 
 
 def create_se_resolver(
-    model: str | None = None, local_dir: str | Path | None = None, *, offline: bool | None = None
+    model: str | None = None,
+    local_dir: str | Path | None = None,
+    *,
+    offline: bool | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Resolver[WespeakerEmbeddings]:
     """Create resolver for SE models."""
-    return Resolver(WespeakerEmbeddings, model, local_dir, offline=offline)
+    return Resolver(WespeakerEmbeddings, model, local_dir, offline=offline, progress_callback=progress_callback)
 
 
 class PreprocessorRuntimeConfig(OnnxSessionOptions, total=False):
@@ -237,9 +250,10 @@ class Manager:
         quantization: str | None = None,
         offline: bool | None = None,
         config: OnnxSessionOptions | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> TextResultsAsrAdapter:
         """Create ASR model."""
-        resolver = create_asr_resolver(model, local_dir, offline=offline)
+        resolver = create_asr_resolver(model, local_dir, offline=offline, progress_callback=progress_callback)
         if config is None:
             config = update_onnx_providers(
                 self.default_onnx_config, excluded_providers=resolver.model_type._get_excluded_providers()
@@ -256,9 +270,10 @@ class Manager:
         quantization: str | None = None,
         offline: bool | None = None,
         config: OnnxSessionOptions | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> Vad:
         """Create VAD model."""
-        resolver = create_vad_resolver(model, local_dir, offline=offline)
+        resolver = create_vad_resolver(model, local_dir, offline=offline, progress_callback=progress_callback)
         if config is None:
             config = update_onnx_providers(
                 self.default_onnx_config, excluded_providers=resolver.model_type._get_excluded_providers()
@@ -273,9 +288,10 @@ class Manager:
         quantization: str | None = None,
         offline: bool | None = None,
         config: OnnxSessionOptions | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> SeAdapter:
         """Create SE model."""
-        resolver = create_se_resolver(model, local_dir, offline=offline)
+        resolver = create_se_resolver(model, local_dir, offline=offline, progress_callback=progress_callback)
         if config is None:
             config = update_onnx_providers(
                 self.default_onnx_config, excluded_providers=resolver.model_type._get_excluded_providers()
@@ -297,6 +313,7 @@ def load_model(
     asr_config: OnnxSessionOptions | None = None,
     preprocessor_config: PreprocessorRuntimeConfig | None = None,
     resampler_config: OnnxSessionOptions | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> TextResultsAsrAdapter:
     """Load ASR model.
 
@@ -329,6 +346,10 @@ def load_model(
         asr_config: ASR ONNX config.
         preprocessor_config: Preprocessor ONNX and concurrency config.
         resampler_config: Resampler ONNX config.
+        progress_callback: Optional callback receiving a :class:`~onnx_asr.progress.DownloadProgress`
+            event for each chunk of bytes downloaded from Hugging Face. When provided,
+            ``tqdm``'s own terminal output is suppressed. Has no effect when all required
+            files are already present locally (no downloads happen).
 
     Returns:
         ASR model class.
@@ -344,7 +365,9 @@ def load_model(
         )
 
     manager = Manager(sess_options, providers, provider_options, preprocessor_config, resampler_config)
-    return manager.create_asr(model, path, quantization=quantization, config=asr_config)
+    return manager.create_asr(
+        model, path, quantization=quantization, config=asr_config, progress_callback=progress_callback
+    )
 
 
 def load_vad(
@@ -355,6 +378,7 @@ def load_vad(
     sess_options: rt.SessionOptions | None = None,
     providers: Sequence[str | Provider | tuple[str | Provider, dict[Any, Any]]] | None = None,
     provider_options: Sequence[dict[Any, Any]] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Vad:
     """Load VAD model.
 
@@ -365,6 +389,9 @@ def load_vad(
         sess_options: Optional SessionOptions for onnxruntime.
         providers: Optional providers for onnxruntime.
         provider_options: Optional provider_options for onnxruntime.
+        progress_callback: Optional callback receiving a :class:`~onnx_asr.progress.DownloadProgress`
+            event for each chunk of bytes downloaded from Hugging Face. Has no effect when
+            all required files are already present locally.
 
     Returns:
         VAD model class.
@@ -385,4 +412,5 @@ def load_vad(
         path,
         quantization=quantization,
         config=config if any(value is not None for value in config.values()) else None,
+        progress_callback=progress_callback,
     )

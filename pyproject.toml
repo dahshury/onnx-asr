@@ -142,6 +142,10 @@ module = ["soundfile.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["tqdm.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["preprocessors.*"]
 follow_imports = "silent"
 

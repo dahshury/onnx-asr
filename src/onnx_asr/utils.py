@@ -88,6 +88,17 @@ class InvalidModelTypeInConfigError(ModelLoadingError, ValueError):
         super().__init__(f"Invalid model type '{model_type}' in config.json.")
 
 
+class StreamingNotSupportedError(NotImplementedError):
+    """Raised when ``Asr.create_stream()`` is called on a model that doesn't support streaming."""
+
+    def __init__(self, model_name: str) -> None:
+        """Create error."""
+        super().__init__(
+            f"Model '{model_name}' does not support streaming. "
+            f"Check `model.capabilities.streaming_native` before calling `create_stream()`."
+        )
+
+
 class AudioLoadingError(ValueError):
     """Audio loading error."""
 
