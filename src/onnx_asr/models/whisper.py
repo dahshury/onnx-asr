@@ -62,6 +62,10 @@ class _Whisper(BaseAsr):
             dtype=np.int64,
         )
         self._detect_lang_input = np.array([[self._bos_token_id]], dtype=np.int64)
+        # GPT-2 BPE maps the leading-space character to "Ġ" (byte 32 via bytes_to_unicode).
+        _btu = bytes_to_unicode()
+        space_unicode = _btu[ord(" ")]
+        self._space_token_id: int | None = self._tokens.get(space_unicode)
 
     @staticmethod
     def _get_excluded_providers() -> list[str]:
@@ -77,7 +81,13 @@ class _Whisper(BaseAsr):
 
     @abstractmethod
     def _decoding(
-        self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = 448,
+        *,
+        suppress_tokens: list[int] | None = None,
+        suppress_blank: bool = False,
     ) -> npt.NDArray[np.int64]: ...
 
     def _decode_tokens(self, tokens: npt.NDArray[np.int64]) -> TimestampedResult:
@@ -86,20 +96,38 @@ class _Whisper(BaseAsr):
             bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
         )
 
+    @staticmethod
+    def _parse_suppress_tokens(raw: object) -> list[int] | None:
+        if raw is None:
+            return None
+        if isinstance(raw, (list, tuple)) and all(isinstance(x, int) for x in raw):
+            return [int(x) for x in raw]
+        return None
+
     def recognize_batch(
         self, waveforms: npt.NDArray[np.float32], waveforms_len: npt.NDArray[np.int64], /, **kwargs: object | None
     ) -> Iterator[TimestampedResult]:
         input_encoding = self._encode(waveforms, waveforms_len)
         input_tokens = np.repeat(self._transcribe_input, len(waveforms), axis=0)
 
+        suppress_tokens = self._parse_suppress_tokens(kwargs.get("suppress_tokens"))
+        raw_blank = kwargs.get("suppress_blank")
+        suppress_blank = bool(raw_blank) if isinstance(raw_blank, bool) else False
+
         language = kwargs.get("language")
         if language:
             input_tokens[:, 1] = self._tokens[f"<|{language}|>"]
         else:
+            # Language detection always greedy and unsuppressed.
             input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
             input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
 
-        return map(self._decode_tokens, self._decoding(input_encoding, input_tokens))
+        return map(
+            self._decode_tokens,
+            self._decoding(
+                input_encoding, input_tokens, suppress_tokens=suppress_tokens, suppress_blank=suppress_blank
+            ),
+        )
 
 
 class WhisperOrt(_Whisper):
@@ -124,8 +152,17 @@ class WhisperOrt(_Whisper):
         return f"whisper{self.config.get('features_size', 80)}"
 
     def _decoding(
-        self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = 448,
+        *,
+        suppress_tokens: list[int] | None = None,
+        suppress_blank: bool = False,
     ) -> npt.NDArray[np.int64]:
+        # The packaged beam-search graph doesn't expose per-step logit filtering,
+        # so suppress_tokens / suppress_blank are no-ops here.
+        del suppress_tokens, suppress_blank
         (sequences,) = self._model.run(
             ["sequences"],
             {
@@ -213,12 +250,35 @@ class WhisperHf(_Whisper):
         }
 
     def _decoding(
-        self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = 448,
+        *,
+        suppress_tokens: list[int] | None = None,
+        suppress_blank: bool = False,
     ) -> npt.NDArray[np.int64]:
         state = self._create_state()
-        for _ in range(tokens.shape[-1], max_length):
+        initial_len = tokens.shape[-1]
+        suppress_arr = np.asarray(suppress_tokens, dtype=np.int64) if suppress_tokens else None
+        # SuppressBlank: at the *first* generation step only, forbid the model from
+        # emitting a leading-space token or EOS — prevents empty / whitespace-only output.
+        blank_arr: npt.NDArray[np.int64] | None = None
+        if suppress_blank and self._space_token_id is not None:
+            blank_arr = np.array([self._space_token_id, self._eos_token_id], dtype=np.int64)
+
+        for step_idx, _ in enumerate(range(initial_len, max_length)):
             logits, state = self._decode(tokens, state, input_features)
-            next_tokens = logits[:, -1].argmax(axis=-1)
+            last_logits = logits[:, -1, :]
+
+            if suppress_arr is not None or (blank_arr is not None and step_idx == 0):
+                last_logits = last_logits.astype(np.float32, copy=True)
+                if suppress_arr is not None:
+                    last_logits[:, suppress_arr] = -np.inf
+                if blank_arr is not None and step_idx == 0:
+                    last_logits[:, blank_arr] = -np.inf
+
+            next_tokens = last_logits.argmax(axis=-1)
             next_tokens[tokens[:, -1] == self._eos_token_id] = self._eos_token_id
             tokens = np.hstack((tokens, next_tokens[:, None]))
             if (tokens[:, -1] == self._eos_token_id).all():

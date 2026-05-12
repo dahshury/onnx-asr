@@ -53,6 +53,10 @@ class RecognizeOptions(TypedDict, total=False):
     """Output language (only for Canary models)."""
     pnc: Literal["pnc", "nopnc"] | bool
     """Output punctuation and capitalization (only for Canary models)."""
+    suppress_tokens: list[int] | None
+    """Token IDs to set to -inf before argmax (Whisper-HF only). Power-user escape hatch."""
+    suppress_blank: bool
+    """At the first generation step, forbid leading-space and EOS (Whisper-HF only)."""
 
 
 class AsrAdapter(ABC, Generic[R]):
