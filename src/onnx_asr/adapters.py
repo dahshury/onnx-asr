@@ -53,6 +53,14 @@ class RecognizeOptions(TypedDict, total=False):
     """Output language (only for Canary models)."""
     pnc: Literal["pnc", "nopnc"] | bool
     """Output punctuation and capitalization (only for Canary models)."""
+    temperature: float | tuple[float, ...] | list[float]
+    """Sampling temperature(s) for Whisper. Single value disables fallback; tuple/list enables the ladder."""
+    no_speech_threshold: float | None
+    """If P(<|nospeech|>) exceeds this and avg log-prob is low, treat as silence and stop the fallback ladder."""
+    compression_ratio_threshold: float | None
+    """gzip(text)/len(text) above this triggers a temperature bump (catches repetition loops)."""
+    logprob_threshold: float | None
+    """Mean log-prob below this triggers a temperature bump."""
 
 
 class AsrAdapter(ABC, Generic[R]):
