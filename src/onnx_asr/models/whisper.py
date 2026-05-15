@@ -70,6 +70,21 @@ class _Whisper(BaseAsr):
             dtype=np.int64,
         )
         self._detect_lang_input = np.array([[self._bos_token_id]], dtype=np.int64)
+        # Timestamp tokens occupy a contiguous range starting at ``<|0.00|>`` with a 0.02 s step.
+        # When ``return_timestamps=True`` we drop ``<|notimestamps|>`` from the prompt so the
+        # decoder can emit segment timestamp tokens.
+        self._timestamp_begin_id: int | None = self._tokens.get("<|0.00|>")
+        self._timestamp_step_s = 0.02
+        self._transcribe_input_with_timestamps = np.array(
+            [
+                [
+                    self._bos_token_id,
+                    self._eos_token_id,
+                    self._tokens["<|transcribe|>"],
+                ]
+            ],
+            dtype=np.int64,
+        )
 
     @staticmethod
     def _get_excluded_providers() -> list[str]:
@@ -88,17 +103,58 @@ class _Whisper(BaseAsr):
         self, input_features: OrtValue, tokens: npt.NDArray[np.int64], max_length: int = 448
     ) -> npt.NDArray[np.int64]: ...
 
+    def _decode_text(self, tokens: npt.NDArray[np.int64] | list[int]) -> str:
+        text = "".join(token for id in tokens if (token := self._vocab[int(id)]) and not token.startswith("<|"))
+        return bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
+
     def _decode_tokens(self, tokens: npt.NDArray[np.int64]) -> TimestampedResult:
-        text = "".join(token for id in tokens if (token := self._vocab[id]) and not token.startswith("<|"))
-        return TimestampedResult(
-            bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
-        )
+        return TimestampedResult(self._decode_text(tokens))
+
+    def _extract_segments(self, tokens: npt.NDArray[np.int64]) -> list[tuple[float, float, str]]:
+        """Parse the Whisper timestamp token stream into ``(start_s, end_s, text)`` segments.
+
+        Whisper emits paired ``<|t|>`` timestamp tokens around each segment::
+
+            <|0.00|> hello world <|2.34|> <|2.34|> how are you <|4.56|>
+
+        Tokens with id ``>= _timestamp_begin_id`` are treated as timestamp markers; the time in
+        seconds is ``(id - _timestamp_begin_id) * 0.02``. Unpaired or empty segments are skipped.
+        """
+        if self._timestamp_begin_id is None:
+            return []
+
+        begin_id = self._timestamp_begin_id
+        step = self._timestamp_step_s
+        segments: list[tuple[float, float, str]] = []
+        i = 0
+        # Skip prompt prefix (BOS/lang/transcribe) — handled by caller passing only generated output.
+        while i < len(tokens):
+            tok = int(tokens[i])
+            if tok < begin_id:
+                i += 1
+                continue
+            start = (tok - begin_id) * step
+            j = i + 1
+            while j < len(tokens) and int(tokens[j]) < begin_id:
+                if int(tokens[j]) == self._eos_token_id:
+                    break
+                j += 1
+            if j >= len(tokens) or int(tokens[j]) < begin_id:
+                break
+            end = (int(tokens[j]) - begin_id) * step
+            text = self._decode_text(tokens[i + 1 : j])
+            if text:
+                segments.append((start, end, text.strip()))
+            i = j + 1
+        return segments
 
     def recognize_batch(
         self, waveforms: npt.NDArray[np.float32], waveforms_len: npt.NDArray[np.int64], /, **kwargs: object | None
     ) -> Iterator[TimestampedResult]:
         input_encoding = self._encode(waveforms, waveforms_len)
-        input_tokens = np.repeat(self._transcribe_input, len(waveforms), axis=0)
+        return_timestamps = bool(kwargs.get("return_timestamps"))
+        prompt = self._transcribe_input_with_timestamps if return_timestamps else self._transcribe_input
+        input_tokens = np.repeat(prompt, len(waveforms), axis=0)
 
         language = kwargs.get("language")
         if language:
@@ -107,21 +163,34 @@ class _Whisper(BaseAsr):
             input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
             input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
 
-        return map(self._decode_tokens, self._decoding(input_encoding, input_tokens))
+        decoded = self._decoding(input_encoding, input_tokens)
+        for row in decoded:
+            text = self._decode_text(row)
+            segments = self._extract_segments(row) if return_timestamps else None
+            yield TimestampedResult(text=text, segments=segments)
 
     def _transcribe_single(
-        self, waveform: npt.NDArray[np.float32], *, language: str | None = None
+        self,
+        waveform: npt.NDArray[np.float32],
+        *,
+        language: str | None = None,
+        with_timestamps: bool = False,
     ) -> tuple[npt.NDArray[np.int64], str]:
         """Run one full decode on a single audio array. Returns (raw_token_ids, decoded_text).
 
-        Internal helper for streaming wrappers that need both the integer
-        token sequence (for LCP / commit policies) and the rendered text.
+        Internal helper for streaming wrappers that need both the integer token
+        sequence (for LCP / commit policies) and the rendered text. When
+        ``with_timestamps=True`` the prompt drops ``<|notimestamps|>`` so the
+        decoder emits ``<|t|>`` segment markers; callers can then extract
+        segment times via :meth:`_extract_segments` to drive audio-buffer
+        trimming (bounded streaming compute).
         """
         wf = waveform.reshape(1, -1).astype(np.float32, copy=False)
         wf_len = np.array([wf.shape[1]], dtype=np.int64)
 
         input_encoding = self._encode(wf, wf_len)
-        input_tokens = np.repeat(self._transcribe_input, 1, axis=0)
+        prompt = self._transcribe_input_with_timestamps if with_timestamps else self._transcribe_input
+        input_tokens = np.repeat(prompt, 1, axis=0)
         if language:
             input_tokens[:, 1] = self._tokens[f"<|{language}|>"]
         else:
@@ -139,43 +208,56 @@ class _Whisper(BaseAsr):
         sample_rate: int = 16_000,
         min_chunk_size_s: float = 1.0,
         language: str | None = None,
+        trim_after_s: float = 8.0,
     ) -> WhisperStream:
         """Open a LocalAgreement-2 streaming session over this Whisper instance.
 
         See :class:`WhisperStream` for the algorithm. The returned object
         satisfies the :class:`~onnx_asr.asr.AsrStream` protocol.
+
+        Args:
+            sample_rate: Input PCM sample rate (must match what push_audio sends).
+            min_chunk_size_s: Minimum buffered audio before each decode step.
+            language: Force a Whisper language code (skips lang autodetect).
+            trim_after_s: Trim the audio buffer up to the latest committed
+                ``<|t|>`` boundary once the buffer exceeds this many seconds.
+                Keeps the LocalAgreement-2 decode bounded; defaults to 8 s.
+                Set to a large number (e.g. 600.0) to disable trimming.
+
         """
         return WhisperStream(
             self,
             sample_rate=sample_rate,
             min_chunk_size_s=min_chunk_size_s,
             language=language,
+            trim_after_s=trim_after_s,
         )
 
 
 class WhisperStream:
     """LocalAgreement-2 streaming wrapper around a Whisper model.
 
-    The classic UFAL whisper_streaming policy, ONNX-friendly. Each ``step()``:
+    The classic UFAL ``whisper_streaming`` policy, ONNX-friendly. Each ``step()``:
 
-    1. Re-decode the whole audio buffer with the underlying greedy decoder.
+    1. Re-decode the whole rolling audio buffer with the underlying greedy
+       decoder, with Whisper timestamp tokens enabled so output carries
+       ``<|t|>`` segment markers.
     2. Compute the longest common prefix (token-level, integer IDs) of the new
-       token sequence against the previous step's sequence.
-    3. Any token at a prefix position that matches across two consecutive
-       decodes is considered **committed** — it won't change in future
-       snapshots — and goes into ``StreamingResult.committed_text``.
-    4. The full decoded text goes into ``StreamingResult.text`` so callers
-       can render the live preview that may still be revised.
+       token sequence against the previous step's — those tokens are committed.
+    3. Render the committed prefix as text (timestamp tokens are stripped by
+       the byte-decoder filter); render the full snapshot as the live preview.
+    4. If the audio buffer exceeds ``trim_after_s`` AND we have at least one
+       committed ``<|t|>`` boundary, drop the audio prefix up to that boundary
+       and move the corresponding text into a persistent history string.
+       The next decode runs on a shorter buffer; LocalAgreement-2 starts
+       fresh on the residual tail.
 
-    On ``finish()``, the next ``step()`` commits everything (every token
-    becomes committed) and the snapshot has ``is_partial=False`` and
-    ``is_endpoint=True``.
+    On ``finish()``, the next ``step()`` commits everything (no LCA needed)
+    and the snapshot has ``is_partial=False`` / ``is_endpoint=True``.
 
-    Bounded compute (audio-buffer trim at committed segment boundary) is
-    deferred — depends on Whisper segment-timestamp extraction (`<|t|>`
-    tokens, plan item #5). Until that lands, the buffer grows over the
-    course of an utterance; the caller should call ``reset()`` on VAD
-    endpoint to drop it.
+    The trim policy bounds per-step compute to O(trim_after_s) regardless of
+    utterance length — without it, decoding a 30 s utterance does 30 full
+    encoder passes on a growing buffer (quadratic).
     """
 
     def __init__(
@@ -185,15 +267,21 @@ class WhisperStream:
         sample_rate: int = 16_000,
         min_chunk_size_s: float = 1.0,
         language: str | None = None,
+        trim_after_s: float = 8.0,
     ) -> None:
         """Bind the stream to ``asr``. See :meth:`_Whisper.create_stream` for kwargs."""
         self._asr = asr
         self._sample_rate = sample_rate
         self._min_chunk_samples = max(1, int(min_chunk_size_s * sample_rate))
         self._language = language
+        self._trim_after_samples = max(self._min_chunk_samples * 2, int(trim_after_s * sample_rate))
         self._buffer: npt.NDArray[np.float32] = np.empty(0, dtype=np.float32)
+        # LocalAgreement-2 state for the *current* (post-trim) window.
         self._prev_token_ids: list[int] = []
         self._committed_count = 0
+        # Text committed in earlier trim windows — concatenated with current
+        # window's committed text on every snapshot.
+        self._history_text = ""
         self._finished = False
         self._endpoint = False
         self._segment_id = 0
@@ -223,7 +311,7 @@ class WhisperStream:
         if not self.is_ready():
             return None
 
-        token_ids, text = self._asr._transcribe_single(self._buffer, language=self._language)
+        token_ids, _ = self._asr._transcribe_single(self._buffer, language=self._language, with_timestamps=True)
         token_ids_list = [int(t) for t in token_ids]
 
         if self._finished:
@@ -236,23 +324,85 @@ class WhisperStream:
             self._committed_count = max(self._committed_count, min(lcp, len(token_ids_list)))
 
         committed_ids = token_ids_list[: self._committed_count]
-        committed_text = (
+        current_window_text = (
             self._asr._decode_tokens(np.asarray(committed_ids, dtype=np.int64)).text if committed_ids else ""
+        )
+        # Render the *full* snapshot (committed + speculative tail) as plain
+        # text for live-preview consumers. ``_decode_text`` strips ``<|...|>``
+        # tokens including timestamp markers.
+        full_text = self._asr._decode_text(token_ids_list)
+
+        # Trim audio buffer up to the latest fully-committed ``<|t|>`` boundary
+        # once it's worth doing — keeps the next decode bounded.
+        if (
+            not self._finished
+            and self._buffer.size >= self._trim_after_samples
+            and self._asr._timestamp_begin_id is not None
+        ):
+            self._maybe_trim_buffer(committed_ids)
+
+        self._prev_token_ids = token_ids_list
+
+        snapshot_text = (self._history_text + " " + full_text).strip() if self._history_text else full_text
+        snapshot_committed = (
+            (self._history_text + " " + current_window_text).strip() if self._history_text else current_window_text
         )
         token_strs = [
             self._asr._vocab[tid] for tid in token_ids_list if not self._asr._vocab.get(tid, "").startswith("<|")
         ]
 
-        self._prev_token_ids = token_ids_list
-
         return StreamingResult(
-            text=text,
+            text=snapshot_text,
             tokens=token_strs,
             timestamps=None,
             is_partial=not self._finished,
             segment_id=self._segment_id,
-            committed_text=committed_text,
+            committed_text=snapshot_committed,
         )
+
+    def _maybe_trim_buffer(self, committed_ids: list[int]) -> None:
+        """Trim audio + token state up to the last ``<|t|>`` in ``committed_ids``.
+
+        Walks the committed-token prefix backwards looking for a timestamp
+        marker (id ``>= _timestamp_begin_id``). If found, drops audio up to
+        that time, moves the corresponding text into :attr:`_history_text`,
+        and resets the LCA window so the next decode operates on the residual
+        tail. No-op if no committed timestamp marker exists yet.
+        """
+        begin_id = self._asr._timestamp_begin_id
+        if begin_id is None:
+            return
+        # Find the latest committed timestamp token (excluding the very first,
+        # which would just be <|0.00|> — trimming there is a no-op).
+        cut_token_idx = -1
+        for i in range(len(committed_ids) - 1, -1, -1):
+            if committed_ids[i] >= begin_id:
+                cut_token_idx = i
+                break
+        if cut_token_idx <= 0:
+            return
+
+        cut_time_s = (committed_ids[cut_token_idx] - begin_id) * self._asr._timestamp_step_s
+        cut_samples = int(cut_time_s * self._sample_rate)
+        if cut_samples <= 0 or cut_samples >= self._buffer.size:
+            return
+
+        # Render the text up to (but not including) the cut timestamp marker
+        # into history. The committed_ids prefix we keep is exactly what's
+        # before that marker.
+        trimmed_text_ids = committed_ids[:cut_token_idx]
+        trimmed_text = (
+            self._asr._decode_tokens(np.asarray(trimmed_text_ids, dtype=np.int64)).text if trimmed_text_ids else ""
+        )
+        if trimmed_text:
+            self._history_text = (
+                (self._history_text + " " + trimmed_text).strip() if self._history_text else trimmed_text
+            )
+
+        # Drop the corresponding audio prefix and reset LCA window.
+        self._buffer = self._buffer[cut_samples:]
+        self._prev_token_ids = []
+        self._committed_count = 0
 
     def reset(self, *, keep_audio: bool = False) -> None:
         """Zero decode state; bump segment id. Drops audio buffer unless ``keep_audio=True``."""
@@ -260,6 +410,7 @@ class WhisperStream:
             self._buffer = np.empty(0, dtype=np.float32)
         self._prev_token_ids = []
         self._committed_count = 0
+        self._history_text = ""
         self._finished = False
         self._endpoint = False
         self._segment_id += 1
@@ -271,7 +422,7 @@ class WhisperStream:
 
     @property
     def buffered_samples(self) -> int:
-        """Current buffer size in samples."""
+        """Current buffer size in samples (post-trim)."""
         return int(self._buffer.size)
 
     @staticmethod
