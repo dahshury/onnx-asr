@@ -5,9 +5,16 @@ from typing import Literal, Protocol
 import numpy as np
 import numpy.typing as npt
 
+from onnx_asr.model_base import _ModelImplementation
 
-class SpeakerEmbedding(Protocol):
-    """Speaker Embedding protocol."""
+
+class SpeakerEmbedding(_ModelImplementation, Protocol):
+    """Speaker Embedding protocol.
+
+    Inherits :class:`_ModelImplementation`'s static infrastructure surface
+    (``_get_model_files`` / ``_get_excluded_providers``); adds the embedding
+    runtime API.
+    """
 
     @staticmethod
     def _get_sample_rate() -> Literal[8_000, 16_000]:
