@@ -14,7 +14,14 @@ import numpy.typing as npt
 import onnxruntime as rt
 from onnxruntime import OrtValue
 
-from onnx_asr.asr import BaseAsr, ModelCapabilities, Preprocessor, StreamingResult, TimestampedResult
+from onnx_asr.asr import (
+    BaseAsr,
+    ModelCapabilities,
+    Preprocessor,
+    StreamingResult,
+    TimestampedResult,
+    WordResult,
+)
 from onnx_asr.onnx import OnnxSessionOptions, TensorRtOptions, get_onnx_device
 from onnx_asr.utils import is_float32_array, is_int32_array
 
@@ -148,20 +155,99 @@ class _Whisper(BaseAsr):
             i = j + 1
         return segments
 
+    @property
+    def supports_word_timestamps(self) -> bool:
+        """Whether this model exports cross-attention (required for word-DTW)."""
+        return False
+
+    def _decoding_with_cross_attention(
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = 448,
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float32]]:
+        """Decode while collecting per-step cross-attention.
+
+        Subclasses that support word timestamps override this method; the
+        default raises ``NotImplementedError`` so callers know the model
+        lacks the required outputs.
+
+        Returns ``(token_ids, cross_attentions)`` where ``cross_attentions``
+        has shape ``(num_layers, num_heads, num_decoder_tokens, num_encoder_frames)``.
+        """
+        msg = f"{type(self).__name__} does not export cross-attention; word timestamps unavailable."
+        raise NotImplementedError(msg)
+
+    def _align_word_timestamps(
+        self,
+        cross_attentions: npt.NDArray[np.float32],
+        generated_tokens: list[int],
+        *,
+        prompt_length: int,
+        num_audio_frames: int,
+        language: str | None = None,
+    ) -> list[WordResult]:
+        """Run cross-attention DTW to recover word timings. See :mod:`word_timestamps`."""
+        from onnx_asr.word_timestamps import align_words, lookup_alignment_heads  # noqa: PLC0415
+
+        num_layers = int(cross_attentions.shape[0])
+        num_heads = int(cross_attentions.shape[1])
+        # ``vocab_size`` distinguishes English-only (51 864) from multilingual.
+        vocab_size = max(self._tokens.values()) + 1
+        heads_mask = lookup_alignment_heads(num_layers, num_heads, vocab_size)
+
+        def decode_one(ids: list[int]) -> str:
+            return self._decode_text(np.asarray(ids, dtype=np.int64))
+
+        timings = align_words(
+            cross_attentions,
+            heads_mask,
+            text_tokens=generated_tokens,
+            decode_one=decode_one,
+            eot_id=self._eos_token_id,
+            prompt_length=prompt_length,
+            num_audio_frames=num_audio_frames,
+            language=language,
+        )
+        return [WordResult(text=t.word, start=t.start, end=t.end) for t in timings]
+
     def recognize_batch(
         self, waveforms: npt.NDArray[np.float32], waveforms_len: npt.NDArray[np.int64], /, **kwargs: object | None
     ) -> Iterator[TimestampedResult]:
         input_encoding = self._encode(waveforms, waveforms_len)
         return_timestamps = bool(kwargs.get("return_timestamps"))
+        return_word_timestamps = bool(kwargs.get("return_word_timestamps")) and self.supports_word_timestamps
         prompt = self._transcribe_input_with_timestamps if return_timestamps else self._transcribe_input
         input_tokens = np.repeat(prompt, len(waveforms), axis=0)
 
-        language = kwargs.get("language")
+        language_raw = kwargs.get("language")
+        language = str(language_raw) if isinstance(language_raw, str) else None
         if language:
             input_tokens[:, 1] = self._tokens[f"<|{language}|>"]
         else:
             input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
             input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
+
+        prompt_length = int(input_tokens.shape[1])
+        num_audio_frames = int(waveforms_len[0]) // 160  # HOP_LENGTH = 160
+
+        if return_word_timestamps:
+            decoded, cross_attentions = self._decoding_with_cross_attention(input_encoding, input_tokens)
+            for batch_idx, row in enumerate(decoded):
+                text = self._decode_text(row)
+                segments = self._extract_segments(row) if return_timestamps else None
+                generated = [int(t) for t in row[prompt_length:] if int(t) != self._eos_token_id]
+                # Trailing EOT is needed by ``align_words`` to anchor the last word.
+                generated.append(self._eos_token_id)
+                words = self._align_word_timestamps(
+                    cross_attentions[batch_idx] if cross_attentions.ndim == 5 else cross_attentions,
+                    generated,
+                    prompt_length=prompt_length,
+                    num_audio_frames=num_audio_frames,
+                    language=language,
+                )
+                yield TimestampedResult(text=text, segments=segments, words=words)
+            return
 
         decoded = self._decoding(input_encoding, input_tokens)
         for row in decoded:
@@ -516,6 +602,101 @@ class WhisperHf(_Whisper):
             for x in self._decoder.get_inputs()
             if x.name.startswith("past_key_values.")
         }
+
+    @property
+    def supports_word_timestamps(self) -> bool:
+        """True iff the decoder export exposes ``cross_attentions.*`` outputs."""
+        return any(o.name.startswith("cross_attentions.") for o in self._decoder.get_outputs())
+
+    def _cross_attention_output_names(self) -> list[str]:
+        """Sorted list of cross-attention output names from the decoder session.
+
+        Sorted by the trailing layer index so the stacked tensor is in
+        canonical ``(layer 0, layer 1, ...)`` order.
+        """
+        names = [o.name for o in self._decoder.get_outputs() if o.name.startswith("cross_attentions.")]
+        return sorted(names, key=lambda n: int(n.removeprefix("cross_attentions.")))
+
+    def _decode_collect_attention(
+        self,
+        tokens: npt.NDArray[np.int64],
+        prev_state: dict[str, OrtValue],
+        encoder_out: OrtValue,
+        cross_attn_names: list[str],
+    ) -> tuple[npt.NDArray[np.float32], dict[str, OrtValue], list[npt.NDArray[np.float32]]]:
+        """Like :meth:`_decode` but also returns per-layer cross-attention arrays.
+
+        Cross-attention is bound as a CPU output (rather than via io_binding's
+        device-typed bind_output) because we'll concatenate it across decode
+        steps on the CPU side. The performance hit is tolerable since word
+        timestamps are an opt-in feature run after the audio is committed.
+        """
+        use_cache = any(x.shape()[0] for x in prev_state.values())
+
+        binding = self._decoder.io_binding()
+        binding.bind_cpu_input("input_ids", tokens[:, -1:] if use_cache else tokens)
+        binding.bind_ortvalue_input("encoder_hidden_states", encoder_out)
+        binding.bind_output("logits")
+        if prev_state:
+            binding.bind_cpu_input("use_cache_branch", np.array([use_cache]))
+            for key, value in prev_state.items():
+                binding.bind_ortvalue_input(key, value)
+                binding.bind_output(key.replace("past_key_values.", "present."), self._device_type, self._device_id)
+        for name in cross_attn_names:
+            binding.bind_output(name)
+
+        self._decoder.run_with_iobinding(binding)
+        outputs = binding.get_outputs()
+        logits = outputs[0].numpy()
+        assert is_float32_array(logits)
+        # Outputs layout: [logits, present.*..., cross_attentions.*...]
+        num_state = len(prev_state)
+        next_state = {
+            key: next_value if next_value.shape()[0] else prev_value
+            for (key, prev_value), next_value in zip(prev_state.items(), outputs[1 : 1 + num_state], strict=True)
+        }
+        cross_attns_step: list[npt.NDArray[np.float32]] = []
+        for i, _name in enumerate(cross_attn_names):
+            arr = outputs[1 + num_state + i].numpy()
+            assert is_float32_array(arr)
+            cross_attns_step.append(arr)
+        return logits, next_state, cross_attns_step
+
+    def _decoding_with_cross_attention(
+        self,
+        input_features: OrtValue,
+        tokens: npt.NDArray[np.int64],
+        max_length: int = 448,
+    ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float32]]:
+        """Autoregressive decode that collects cross-attention across all steps.
+
+        Returns ``(token_ids, cross_attentions)`` where cross_attentions has
+        shape ``(batch, num_layers, num_heads, num_decoder_tokens, num_encoder_frames)``.
+        """
+        cross_attn_names = self._cross_attention_output_names()
+        if not cross_attn_names:
+            msg = "Decoder export does not include cross_attentions.* outputs."
+            raise RuntimeError(msg)
+
+        state = self._create_state()
+        # Per-layer running buffers — list of (batch, heads, dec_step_len, enc_frames).
+        # Concatenated along the decoder-sequence axis as we generate.
+        per_layer_attn: list[list[npt.NDArray[np.float32]]] = [[] for _ in cross_attn_names]
+        for _ in range(tokens.shape[-1], max_length):
+            logits, state, attn_step = self._decode_collect_attention(tokens, state, input_features, cross_attn_names)
+            for li, arr in enumerate(attn_step):
+                per_layer_attn[li].append(arr)
+            next_tokens = logits[:, -1].argmax(axis=-1)
+            next_tokens[tokens[:, -1] == self._eos_token_id] = self._eos_token_id
+            tokens = np.hstack((tokens, next_tokens[:, None]))
+            if (tokens[:, -1] == self._eos_token_id).all():
+                break
+
+        # Stack each layer's per-step attention along the decoder-sequence axis.
+        stacked_per_layer = [np.concatenate(layer_steps, axis=2) for layer_steps in per_layer_attn]
+        # Stack layers → (batch, num_layers, num_heads, num_dec_tokens, num_enc_frames).
+        full = np.stack(stacked_per_layer, axis=1).astype(np.float32, copy=False)
+        return tokens, full
 
     def _decode(
         self,

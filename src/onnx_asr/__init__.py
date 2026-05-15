@@ -2,7 +2,7 @@
 
 from importlib.metadata import version as _version
 
-from .asr import AsrStream, ModelCapabilities, StreamingResult
+from .asr import AsrStream, ModelCapabilities, StreamingResult, TimestampedResult, WordResult
 from .loader import load_model, load_vad, load_wake_word
 from .progress import DownloadProgress, ProgressCallback
 from .utils import StreamingNotSupportedError
@@ -17,8 +17,10 @@ __all__ = [
     "ProgressCallback",
     "StreamingNotSupportedError",
     "StreamingResult",
+    "TimestampedResult",
     "WakeWord",
     "WakeWordResult",
+    "WordResult",
     "load_model",
     "load_vad",
     "load_wake_word",
