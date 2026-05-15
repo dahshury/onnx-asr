@@ -146,6 +146,10 @@ module = ["tqdm.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["pvporcupine.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["preprocessors.*"]
 follow_imports = "silent"
 
