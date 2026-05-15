@@ -203,6 +203,19 @@ class _Whisper(BaseAsr):
         msg = f"{type(self).__name__} does not export cross-attention; word timestamps unavailable."
         raise NotImplementedError(msg)
 
+    def _decode_text_preserve_leading_space(self, tokens: npt.NDArray[np.int64] | list[int]) -> str:
+        """Decode tokens to text but DO NOT strip the leading space.
+
+        :meth:`_decode_text` removes a single leading space because Whisper's
+        BPE tokenizer always prepends ``Ġ`` (i.e. " ") to the first text
+        token of an utterance — for the user-facing transcript that prefix
+        is noise. But word-boundary detection in :func:`split_tokens_into_words`
+        relies on that leading space to know where one word ends and the
+        next begins, so this variant preserves it.
+        """
+        text = "".join(token for id in tokens if (token := self._vocab[int(id)]) and not token.startswith("<|"))
+        return bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace")
+
     def _align_word_timestamps(
         self,
         cross_attentions: npt.NDArray[np.float32],
@@ -221,7 +234,10 @@ class _Whisper(BaseAsr):
         heads_mask = lookup_alignment_heads(num_layers, num_heads, vocab_size)
 
         def decode_one(ids: list[int]) -> str:
-            return self._decode_text(np.asarray(ids, dtype=np.int64))
+            # Critical: ``split_tokens_into_words`` keys on leading ``Ġ`` →
+            # space prefix; we must NOT strip it here or every subword
+            # collapses into a single mega-word.
+            return self._decode_text_preserve_leading_space(ids)
 
         timings = align_words(
             cross_attentions,
