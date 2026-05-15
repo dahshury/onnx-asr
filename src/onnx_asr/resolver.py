@@ -2,8 +2,9 @@
 
 import json
 from pathlib import Path
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, TypeVar
 
+from onnx_asr.model_base import _ModelImplementation
 from onnx_asr.utils import (
     InvalidModelTypeInConfigError,
     ModelFileNotFoundError,
@@ -32,12 +33,7 @@ model_repos = {
 }
 
 
-class _Model(Protocol):
-    @staticmethod
-    def _get_model_files(quantization: str | None = None) -> dict[str, str]: ...
-
-
-T = TypeVar("T", bound=_Model)
+T = TypeVar("T", bound=_ModelImplementation)
 
 
 class Resolver(Generic[T]):

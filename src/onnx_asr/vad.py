@@ -10,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from onnx_asr.asr import Asr, TimestampedResult
+from onnx_asr.model_base import _ModelImplementation
 from onnx_asr.utils import pad_list
 
 
@@ -30,8 +31,13 @@ class TimestampedSegmentResult(TimestampedResult, SegmentResult):
     """Timestamped segment recognition result."""
 
 
-class Vad(Protocol):
-    """VAD protocol."""
+class Vad(_ModelImplementation, Protocol):
+    """VAD protocol.
+
+    Inherits :class:`_ModelImplementation`'s static infrastructure surface
+    (``_get_model_files`` / ``_get_excluded_providers``); adds the runtime
+    segmentation API.
+    """
 
     def recognize_batch(
         self,
