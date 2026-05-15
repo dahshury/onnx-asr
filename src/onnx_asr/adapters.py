@@ -55,6 +55,12 @@ class RecognizeOptions(TypedDict, total=False):
     """Output punctuation and capitalization (only for Canary models)."""
     return_timestamps: bool
     """Emit segment timestamps (only for Whisper models). Sets ``TimestampedResult.segments``."""
+    return_word_timestamps: bool
+    """Emit per-word timestamps via cross-attention DTW (only for Whisper-timestamped exports).
+
+    Sets ``TimestampedResult.words``. Requires a model exporting cross-attention as decoder
+    outputs (e.g. ``onnx-community/whisper-*_timestamped``); falls back to ``None`` otherwise.
+    """
 
 
 class AsrAdapter(ABC, Generic[R]):

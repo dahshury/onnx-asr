@@ -17,6 +17,24 @@ from onnx_asr.utils import log_softmax
 S = TypeVar("S")
 
 
+@dataclass(frozen=True)
+class WordResult:
+    """Word-level alignment result from cross-attention DTW.
+
+    Returned in :attr:`TimestampedResult.words` when a Whisper-timestamped
+    model is invoked with ``return_word_timestamps=True``. Only supported
+    by the ``onnx-community/whisper-*_timestamped`` exports, which expose
+    cross-attention tensors as decoder outputs.
+    """
+
+    text: str
+    """Rendered word (including any leading space)."""
+    start: float
+    """Word start time in seconds."""
+    end: float
+    """Word end time in seconds."""
+
+
 @dataclass
 class TimestampedResult:
     """Timestamped recognition result."""
@@ -31,6 +49,8 @@ class TimestampedResult:
     """Tokens logprob list."""
     segments: list[tuple[float, float, str]] | None = None
     """For Whisper with ``return_timestamps=True``: ``(start_s, end_s, text)`` per segment."""
+    words: list[WordResult] | None = None
+    """For Whisper-timestamped models with ``return_word_timestamps=True``: per-word alignment."""
 
 
 class AsrConfig(TypedDict, total=False):
