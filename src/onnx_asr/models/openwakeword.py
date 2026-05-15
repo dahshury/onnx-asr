@@ -184,3 +184,13 @@ class OpenWakeWord(WakeWord):
     @staticmethod
     def _get_sample_rate() -> Literal[16_000]:
         return 16_000
+
+    def close(self, *, empty_torch_cache: bool = True) -> int:
+        """Release the melspec + embedding + per-wake-word classifier ORT sessions.
+
+        Walks ``self._classifiers`` (a dict of per-keyword sessions) plus the
+        two shared front-end sessions and nulls each. See :meth:`BaseAsr.close`.
+        """
+        from onnx_asr._session_cleanup import release_inference_sessions  # noqa: PLC0415
+
+        return release_inference_sessions(self, empty_torch_cache=empty_torch_cache)

@@ -181,3 +181,18 @@ class PorcupineWakeWord(WakeWord):
         if engine is not None and hasattr(engine, "delete"):
             engine.delete()
             self._engine = None
+
+    def close(self, *, empty_torch_cache: bool = True) -> int:
+        """Release the Porcupine engine handle (no ORT sessions to walk).
+
+        Porcupine doesn't use ``onnxruntime`` — its engine is wrapped via
+        ``pvporcupine``. ``close`` simply delegates to :meth:`cleanup`,
+        which calls the engine's ``delete()``. Signature matches the other
+        ``close`` methods for protocol parity.
+
+        Returns:
+            0 (no ORT sessions on this class).
+
+        """
+        self.cleanup()
+        return 0

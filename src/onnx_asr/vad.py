@@ -126,3 +126,9 @@ class BaseVad(Vad):
                 )
 
         return map(recognize, waveforms, self.segment_batch(waveforms, waveforms_len, sample_rate, **kwargs))
+
+    def close(self, *, empty_torch_cache: bool = True) -> int:
+        """Release every ORT InferenceSession held by this VAD. See :meth:`BaseAsr.close`."""
+        from onnx_asr._session_cleanup import release_inference_sessions  # noqa: PLC0415
+
+        return release_inference_sessions(self, empty_torch_cache=empty_torch_cache)

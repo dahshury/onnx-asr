@@ -236,6 +236,24 @@ class BaseAsr(Asr):
         """
         raise StreamingNotSupportedError(type(self).__name__)
 
+    def close(self, *, empty_torch_cache: bool = True) -> int:
+        """Release every ORT InferenceSession held by this model.
+
+        Walks the attribute graph and nulls each :class:`onnxruntime.InferenceSession`
+        in place, then forces a double :func:`gc.collect` to fire the C++ destructors
+        before the interpreter shuts down (avoids the Windows DLL-unload race).
+
+        Args:
+            empty_torch_cache: Also call ``torch.cuda.empty_cache()`` if available.
+
+        Returns:
+            Number of sessions released. Idempotent: a second call returns 0.
+
+        """
+        from onnx_asr._session_cleanup import release_inference_sessions  # noqa: PLC0415
+
+        return release_inference_sessions(self, empty_torch_cache=empty_torch_cache)
+
 
 class _AsrWithDecoding(BaseAsr):
     DECODE_SPACE_PATTERN = re.compile(r"\A\s|\s\B|(\s)\b")

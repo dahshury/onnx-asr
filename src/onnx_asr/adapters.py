@@ -74,6 +74,44 @@ class AsrAdapter(ABC, Generic[R]):
         self.asr = asr
         self.resampler = resampler
 
+    def close(self, *, empty_torch_cache: bool = True) -> int:
+        """Release ORT sessions held by the wrapped ASR + resampler (and VAD if present).
+
+        Walks the adapter graph and nulls every :class:`onnxruntime.InferenceSession`,
+        then forces a double GC. After ``close()`` the adapter must not be used.
+
+        Args:
+            empty_torch_cache: Also call ``torch.cuda.empty_cache()`` if available
+                (frees the CUDA allocator pool that torch keeps around). Default True.
+
+        Returns:
+            Number of ORT sessions released across all wrapped components.
+
+        Example:
+            >>> with onnx_asr.load_model("whisper-base", quantization="int8") as model:
+            ...     text = model.recognize(audio)
+            # model.close() called automatically on exit; RSS returns to baseline.
+
+        """
+        from onnx_asr._session_cleanup import release_inference_sessions  # noqa: PLC0415
+
+        # Walk the whole adapter — picks up self.asr, self.resampler, self.vad,
+        # plus any other ORT sessions stashed anywhere in the graph.
+        return release_inference_sessions(self, empty_torch_cache=empty_torch_cache)
+
+    def __enter__(self) -> AsrAdapter[R]:
+        """Context-manager entry — returns ``self`` for ``with`` syntax."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> None:
+        """Context-manager exit — releases ORT sessions even on exception."""
+        self.close()
+
     def with_vad(self, vad: Vad, **kwargs: Unpack[VadOptions]) -> SegmentResultsAsrAdapter:
         """Create ASR adapter with VAD.
 
@@ -252,6 +290,25 @@ class SeAdapter:
         """Create SE adapter."""
         self.se = se
         self.resampler = resampler
+
+    def close(self, *, empty_torch_cache: bool = True) -> int:
+        """Release ORT sessions held by the wrapped SE model + resampler."""
+        from onnx_asr._session_cleanup import release_inference_sessions  # noqa: PLC0415
+
+        return release_inference_sessions(self, empty_torch_cache=empty_torch_cache)
+
+    def __enter__(self) -> SeAdapter:  # noqa: PYI034 — concrete class; Self not needed for subclassing here
+        """Context-manager entry — returns ``self`` for ``with`` syntax."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: object,
+    ) -> None:
+        """Context-manager exit — releases ORT sessions even on exception."""
+        self.close()
 
     def embedding(
         self,

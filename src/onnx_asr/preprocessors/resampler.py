@@ -59,3 +59,13 @@ class Resampler:
         assert is_float32_array(resampled)
         assert is_int64_array(resampled_lens)
         return resampled, resampled_lens
+
+    def close(self, *, empty_torch_cache: bool = False) -> int:
+        """Release the per-input-rate resampling ORT sessions.
+
+        Adapters call this from their own ``close()`` so users only ever
+        need to call ``adapter.close()``.
+        """
+        from onnx_asr._session_cleanup import release_inference_sessions  # noqa: PLC0415
+
+        return release_inference_sessions(self, empty_torch_cache=empty_torch_cache)

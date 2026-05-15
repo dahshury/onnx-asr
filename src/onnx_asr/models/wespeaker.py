@@ -51,3 +51,9 @@ class WespeakerEmbeddings(SpeakerEmbedding):
         (embs,) = self._model.run(["embs"], {"feats": features})
         assert is_float32_array(embs)
         return embs
+
+    def close(self, *, empty_torch_cache: bool = True) -> int:
+        """Release the embedding ORT session. See :meth:`BaseAsr.close`."""
+        from onnx_asr._session_cleanup import release_inference_sessions  # noqa: PLC0415
+
+        return release_inference_sessions(self, empty_torch_cache=empty_torch_cache)

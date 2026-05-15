@@ -86,7 +86,11 @@ docs = [
     "ruff>=0.15.11",
 ]
 jupyter = ["ipykernel<7", "ipywidgets>=8.1.8", "nbstripout>=0.9.1"]
-test = ["pytest>=9.0.3", "pytest-cov>=7.0.0"]
+test = [
+    "psutil>=7.2.2",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.0.0",
+]
 test-all = [
     "kaldi-native-fbank>=1.22.3",
     "nemo-toolkit[asr]>=2.7.2",
