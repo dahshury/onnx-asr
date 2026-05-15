@@ -11,6 +11,7 @@ from typing import ClassVar, Generic, Literal, Protocol, TypedDict, TypeVar, run
 import numpy as np
 import numpy.typing as npt
 
+from onnx_asr.model_base import _ModelImplementation
 from onnx_asr.onnx import OnnxSessionOptions, TensorRtOptions
 from onnx_asr.utils import StreamingNotSupportedError, log_softmax
 
@@ -137,8 +138,13 @@ class Preprocessor(Protocol):
         ...
 
 
-class Asr(Protocol):
-    """ASR protocol."""
+class Asr(_ModelImplementation, Protocol):
+    """ASR protocol.
+
+    Inherits :class:`_ModelImplementation`'s static infrastructure surface
+    (``_get_model_files`` / ``_get_excluded_providers``); adds the runtime
+    decode API.
+    """
 
     capabilities: ClassVar[ModelCapabilities]
 
