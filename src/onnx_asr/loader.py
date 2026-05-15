@@ -13,6 +13,7 @@ from onnx_asr.models.gigaam import GigaamV2Ctc, GigaamV2Rnnt, GigaamV3E2eCtc, Gi
 from onnx_asr.models.kaldi import KaldiTransducer
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
 from onnx_asr.models.pyannote import PyAnnoteVad
+from onnx_asr.models.openwakeword import OpenWakeWord
 from onnx_asr.models.silero import SileroVad
 from onnx_asr.models.tone import TOneCtc
 from onnx_asr.models.wespeaker import WespeakerEmbeddings
@@ -32,6 +33,7 @@ from onnx_asr.utils import (
     ModelNotSupportedError,
 )
 from onnx_asr.vad import Vad
+from onnx_asr.wake_word import WakeWord
 
 AsrNames = Literal[
     "gigaam-v2-ctc",
@@ -72,6 +74,14 @@ VadNames = Literal["silero", "onnx-community/pyannote-segmentation-3.0"]
 
 VadTypeNames = Literal["pyannote"]
 """Supported VAD model types."""
+
+WakeWordNames = Literal["openwakeword"]
+"""Supported wake-word model names (can be automatically downloaded from the Hugging Face)."""
+
+WakeWordTypeNames = Literal["openwakeword"]
+"""Supported wake-word model types."""
+
+WakeWordTypes: TypeAlias = OpenWakeWord
 
 AsrTypes: TypeAlias = (
     GigaamV2Ctc
@@ -131,6 +141,16 @@ def create_vad_resolver(
     model_types: dict[str, type[VadTypes]] = {
         "silero": SileroVad,
         "pyannote": PyAnnoteVad,
+    }
+    return Resolver(model_types, model, local_dir, offline=offline)
+
+
+def create_wake_word_resolver(
+    model: str | None = None, local_dir: str | Path | None = None, *, offline: bool | None = None
+) -> Resolver[WakeWordTypes]:
+    """Create resolver for wake-word models."""
+    model_types: dict[str, type[WakeWordTypes]] = {
+        "openwakeword": OpenWakeWord,
     }
     return Resolver(model_types, model, local_dir, offline=offline)
 
@@ -284,6 +304,23 @@ class Manager:
             resolver.model_type(resolver.resolve_model(quantization=quantization), self._create_preprocessor, config)
         )
 
+    def create_wake_word(
+        self,
+        model: str | WakeWordNames | WakeWordTypeNames | None = None,
+        local_dir: str | Path | None = None,
+        *,
+        quantization: str | None = None,
+        offline: bool | None = None,
+        config: OnnxSessionOptions | None = None,
+    ) -> WakeWord:
+        """Create wake-word model."""
+        resolver = create_wake_word_resolver(model, local_dir, offline=offline)
+        if config is None:
+            config = update_onnx_providers(
+                self.default_onnx_config, excluded_providers=resolver.model_type._get_excluded_providers()
+            )
+        return resolver.model_type(resolver.resolve_model(quantization=quantization), config)
+
 
 def load_model(
     model: str | AsrNames | AsrTypeNames,
@@ -381,6 +418,51 @@ def load_vad(
     }
 
     return manager.create_vad(
+        model,
+        path,
+        quantization=quantization,
+        config=config if any(value is not None for value in config.values()) else None,
+    )
+
+
+def load_wake_word(
+    model: str | WakeWordNames | WakeWordTypeNames = "openwakeword",
+    path: str | Path | None = None,
+    *,
+    quantization: str | None = None,
+    sess_options: rt.SessionOptions | None = None,
+    providers: Sequence[str | Provider | tuple[str | Provider, dict[Any, Any]]] | None = None,
+    provider_options: Sequence[dict[Any, Any]] | None = None,
+) -> WakeWord:
+    """Load a wake-word detection model.
+
+    Mirrors :func:`load_vad`: pass an alias / HF repo id / type name, optionally
+    a local directory of pre-downloaded artifacts, optional quantization tier
+    and ORT session knobs. Returns a :class:`~onnx_asr.wake_word.WakeWord`
+    instance ready for :meth:`~onnx_asr.wake_word.WakeWord.detect_batch`.
+
+    Args:
+        model: Wake-word model name / type / HF repo id. Default: ``openwakeword``.
+        path: Local directory with pre-downloaded model files (skips download).
+        quantization: ORT quantization tier (``None`` | ``int8`` | ...). Usually irrelevant for OWW.
+        sess_options: Optional ORT SessionOptions.
+        providers: Optional ORT execution providers.
+        provider_options: Optional provider_options.
+
+    Returns:
+        Concrete :class:`~onnx_asr.wake_word.WakeWord` implementation.
+
+    Raises:
+        utils.ModelLoadingError: Model loading error (onnx-asr specific).
+    """
+    manager = Manager()
+    config: OnnxSessionOptions = {
+        "sess_options": sess_options,
+        "providers": providers,
+        "provider_options": provider_options,
+    }
+
+    return manager.create_wake_word(
         model,
         path,
         quantization=quantization,
