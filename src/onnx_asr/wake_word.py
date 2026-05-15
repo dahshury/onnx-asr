@@ -74,6 +74,7 @@ class WakeWord(_ModelImplementation, Protocol):
 
         Yields:
             One :class:`WakeWordResult` per clip in batch order.
+
         """
         ...
 

@@ -12,8 +12,8 @@ from onnx_asr.asr import Asr, Preprocessor
 from onnx_asr.models.gigaam import GigaamV2Ctc, GigaamV2Rnnt, GigaamV3E2eCtc, GigaamV3E2eRnnt
 from onnx_asr.models.kaldi import KaldiTransducer
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
-from onnx_asr.models.pyannote import PyAnnoteVad
 from onnx_asr.models.openwakeword import OpenWakeWord
+from onnx_asr.models.pyannote import PyAnnoteVad
 from onnx_asr.models.silero import SileroVad
 from onnx_asr.models.tone import TOneCtc
 from onnx_asr.models.wespeaker import WespeakerEmbeddings
@@ -490,6 +490,7 @@ def load_wake_word(
 
     Raises:
         utils.ModelLoadingError: Model loading error (onnx-asr specific).
+
     """
     manager = Manager()
     config: OnnxSessionOptions = {

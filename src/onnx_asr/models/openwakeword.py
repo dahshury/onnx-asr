@@ -59,6 +59,7 @@ class OpenWakeWord(WakeWord):
         Args:
             model_files: Dict from logical key → resolved file path.
             onnx_options: ORT session options applied uniformly to all sessions.
+
         """
         self._melspec = rt.InferenceSession(model_files["melspec"], **onnx_options)
         self._embedding = rt.InferenceSession(model_files["embedding"], **onnx_options)
@@ -96,10 +97,11 @@ class OpenWakeWord(WakeWord):
 
     @property
     def wake_words(self) -> tuple[str, ...]:
+        """Names of the loaded wake-word classifiers in stable sorted order."""
         return self._wake_words
 
     def _mel_window(self, pcm_int16: npt.NDArray[np.int16]) -> npt.NDArray[np.float32]:
-        """Compute the 76 × 32 mel-spectrogram for a single audio window.
+        """Compute the 76 x 32 mel-spectrogram for a single audio window.
 
         Mirrors OpenWakeWord's reference scaling (``mel/10 + 2``) which
         aligns the ONNX export with the original TF SavedModel range.
