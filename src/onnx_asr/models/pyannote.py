@@ -60,13 +60,22 @@ class PyAnnoteVad(BaseVad):
             **kwargs: additional keyword arguments passed through to inner calls
 
         """
+        # Sliding window needs at least one full window of audio. Short clips
+        # (typical for short utterances < 10 s) get right-padded with zeros to
+        # one window length so we still produce a single inference pass.
+        original_len = waveforms.shape[1]
+        if original_len < window_size:
+            waveforms = np.pad(waveforms, ((0, 0), (0, window_size - original_len)))
+
         # 10s sliding window and 5s overlap
         windows = np.lib.stride_tricks.sliding_window_view(waveforms, window_size, axis=-1)[
             :, :: (window_size - overlap), :
         ]  # This will drop the last window if its length is less than the overlap (5s), be careful
 
         self._num_windows = windows.shape[1]
-        if last_window_size := waveforms.shape[1] % (window_size - overlap):
+        # No partial-tail pass when the original audio fit inside one window.
+        tail_remainder = original_len % (window_size - overlap) if original_len >= window_size else 0
+        if tail_remainder:
             self._num_windows += 1
 
         def process(window: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
@@ -87,11 +96,11 @@ class PyAnnoteVad(BaseVad):
         for i in range(windows.shape[1]):
             yield process(windows[:, i, :])
 
-        if last_window_size := waveforms.shape[1] % (window_size - overlap):
+        if tail_remainder:
             yield process(
                 np.pad(
-                    waveforms[:, -(last_window_size + overlap) :],
-                    ((0, 0), (0, (window_size - overlap - last_window_size))),
+                    waveforms[:, -(tail_remainder + overlap) :],
+                    ((0, 0), (0, (window_size - overlap - tail_remainder))),
                 )
             )
 
@@ -233,3 +242,54 @@ class PyAnnoteVad(BaseVad):
                 )
                 for undecode_windows, waveform_len in zip(zip(*encoding, strict=True), waveforms_len, strict=False)
             )
+
+    def speaker_probs_batch(
+        self,
+        waveforms: npt.NDArray[np.float32],
+        waveforms_len: npt.NDArray[np.int64],
+        sample_rate: Literal[8000, 16000] = 16000,
+    ) -> Iterator[tuple[npt.NDArray[np.float32], int]]:
+        """Yield ``(probs, frame_step_samples)`` for each waveform in the batch.
+
+        ``probs`` is a ``(num_frames, 3)`` float32 array of per-frame per-local-speaker
+        probabilities (the powerset decoder collapses to up to 3 simultaneous speakers
+        within a 10 s window; the reorder step keeps local IDs consistent across
+        overlapping windows). Each frame represents :attr:`STRIDE` audio samples.
+
+        Use for downstream speaker diarization: thread these per-frame activations
+        through an embedding extractor and a clusterer (see :mod:`onnx_asr.diarization`).
+        """
+        window_size = 10 * sample_rate
+        overlap = 5 * sample_rate
+        del waveforms_len  # used by segment_batch only; full prob track is yielded here
+
+        encoding = self._encode(waveforms, window_size, overlap)
+        if len(waveforms) == 1:
+            chunks: list[npt.NDArray[np.float32]] = []
+            offsets: list[int] = []
+            for begin, window in self._decode(
+                (batch_windows[0] for batch_windows in encoding), window_size, overlap
+            ):
+                # window has shape (num_frames, 4); drop the no-speech column.
+                chunks.append(window[:, 1:4])
+                offsets.append(begin)
+            if not chunks:
+                yield np.zeros((0, 3), dtype=np.float32), self.STRIDE
+                return
+            # Concatenate; offsets are in samples and chunks are non-overlapping
+            # (the decoder already removed the overlap region from each except the
+            # last). We rebuild a single contiguous (frames, 3) array.
+            yield np.concatenate(chunks, axis=0).astype(np.float32, copy=False), self.STRIDE
+        else:
+            for undecode_windows in zip(*encoding, strict=True):
+                chunks2: list[npt.NDArray[np.float32]] = []
+                for _begin, window in self._decode(
+                    cast(Iterator[npt.NDArray[np.float32]], iter(undecode_windows)),
+                    window_size,
+                    overlap,
+                ):
+                    chunks2.append(window[:, 1:4])
+                if not chunks2:
+                    yield np.zeros((0, 3), dtype=np.float32), self.STRIDE
+                else:
+                    yield np.concatenate(chunks2, axis=0).astype(np.float32, copy=False), self.STRIDE

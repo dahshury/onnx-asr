@@ -2,7 +2,7 @@
 
 import contextlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Generic, TypeVar
 
 from onnx_asr.model_base import _ModelImplementation
@@ -32,6 +32,8 @@ model_repos = {
     "nemo-canary-1b-v2": "istupakov/canary-1b-v2-onnx",
     "whisper-base": "istupakov/whisper-base-onnx",
     "silero": "istupakov/silero-vad-onnx",
+    # Speaker-embedding model used by the diarizer (CC-BY-4.0; VoxCeleb-trained).
+    "wespeaker-voxceleb-resnet34-LM": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
 }
 
 
@@ -111,7 +113,15 @@ class Resolver(Generic[T]):
             "config.json",
             "config.yaml",
             *files,
-            *(str(path.with_suffix(".onnx?data")) for file in files if (path := Path(file)).suffix == ".onnx"),
+            # Windows-safe: use ``PurePosixPath`` so the generated pattern keeps
+            # forward slashes. HF's ``snapshot_download`` allow_patterns are
+            # ``fnmatch``-ed against POSIX-style repo paths; constructing the
+            # pattern via the host's ``Path`` on Windows produces backslashes
+            # that never match (silently skips the ``.onnx_data`` sidecar
+            # downloads for any model with >2 GB ONNX weights, e.g.
+            # Xenova/whisper-large-v3, which then fails at load with
+            # ``External data path validation failed`` from ORT).
+            *(str(path.with_suffix(".onnx?data")) for file in files if (path := PurePosixPath(file)).suffix == ".onnx"),
         ]
 
         assert self.repo_id is not None

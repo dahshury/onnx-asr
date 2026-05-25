@@ -9,6 +9,7 @@ import onnxruntime as rt
 
 from onnx_asr.adapters import SeAdapter, TextResultsAsrAdapter
 from onnx_asr.asr import Asr, Preprocessor
+from onnx_asr.diarization import Diarizer, SessionDiarizer
 from onnx_asr.models.gigaam import GigaamV2Ctc, GigaamV2Rnnt, GigaamV3E2eCtc, GigaamV3E2eRnnt
 from onnx_asr.models.kaldi import KaldiTransducer
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
@@ -328,6 +329,62 @@ class Manager:
             resolver.model_type(resolver.resolve_model(quantization=quantization), self._create_preprocessor, config)
         )
 
+    def create_diarizer(
+        self,
+        *,
+        segmentation_model: str = "onnx-community/pyannote-segmentation-3.0",
+        embedding_model: str = "wespeaker-voxceleb-resnet34-LM",
+        segmentation_path: str | Path | None = None,
+        embedding_path: str | Path | None = None,
+        quantization: str | None = None,
+        offline: bool | None = None,
+        config: OnnxSessionOptions | None = None,
+        progress_callback: ProgressCallback | None = None,
+        **diarizer_kwargs: float,
+    ) -> Diarizer:
+        """Create a speaker diarizer.
+
+        Wires a PyAnnote VAD (used in segmentation-only mode here) and a
+        Wespeaker embedding adapter into :class:`~onnx_asr.diarization.Diarizer`.
+
+        Args:
+            segmentation_model: HF repo id for pyannote-segmentation-3.0 ONNX.
+            embedding_model: HF repo id or alias for the speaker embedder.
+            segmentation_path: optional local dir override for the segmentation model.
+            embedding_path: optional local dir override for the embedding model.
+            quantization: ORT quantization tier passed to both models.
+            offline: forbid network downloads on both models.
+            config: ONNX session config applied to both models.
+            progress_callback: download progress hook.
+            **diarizer_kwargs: forwarded to :class:`~onnx_asr.diarization.Diarizer`'s
+                constructor (``onset``, ``offset``, ``min_segment_duration`` …).
+        """
+        seg_resolver = create_vad_resolver(
+            segmentation_model, segmentation_path, offline=offline, progress_callback=progress_callback
+        )
+        seg_config = config or update_onnx_providers(
+            self.default_onnx_config, excluded_providers=seg_resolver.model_type._get_excluded_providers()
+        )
+        segmenter = seg_resolver.model_type(seg_resolver.resolve_model(quantization=quantization), seg_config)
+        # The diarizer needs the PyAnnoteVad concrete class for speaker_probs_batch().
+        from onnx_asr.models.pyannote import PyAnnoteVad  # noqa: PLC0415
+
+        if not isinstance(segmenter, PyAnnoteVad):
+            msg = f"diarizer requires a pyannote segmentation model, got {type(segmenter).__name__}"
+            raise TypeError(msg)
+
+        embed_resolver = create_se_resolver(
+            embedding_model, embedding_path, offline=offline, progress_callback=progress_callback
+        )
+        emb_config = config or update_onnx_providers(
+            self.default_onnx_config, excluded_providers=embed_resolver.model_type._get_excluded_providers()
+        )
+        embedder_model = embed_resolver.model_type(
+            embed_resolver.resolve_model(quantization=quantization), self._create_preprocessor, emb_config
+        )
+        embedder_adapter = self._create_se_adapter(embedder_model)
+        return Diarizer(segmenter, embedder_adapter, **diarizer_kwargs)
+
     def create_wake_word(
         self,
         model: str | WakeWordNames | WakeWordTypeNames | None = None,
@@ -458,6 +515,109 @@ def load_vad(
         quantization=quantization,
         config=config if any(value is not None for value in config.values()) else None,
         progress_callback=progress_callback,
+    )
+
+
+def load_diarizer(
+    *,
+    segmentation_model: str = "onnx-community/pyannote-segmentation-3.0",
+    embedding_model: str = "wespeaker-voxceleb-resnet34-LM",
+    segmentation_path: str | Path | None = None,
+    embedding_path: str | Path | None = None,
+    quantization: str | None = None,
+    sess_options: rt.SessionOptions | None = None,
+    providers: Sequence[str | Provider | tuple[str | Provider, dict[Any, Any]]] | None = None,
+    provider_options: Sequence[dict[Any, Any]] | None = None,
+    progress_callback: ProgressCallback | None = None,
+    **diarizer_kwargs: float,
+) -> Diarizer:
+    """Load a speaker diarizer (pyannote segmentation + wespeaker embedding).
+
+    The default model pair — ``onnx-community/pyannote-segmentation-3.0`` (MIT,
+    ~6 MB) + ``Wespeaker/wespeaker-voxceleb-resnet34-LM`` (CC-BY-4.0, ~26 MB) —
+    adds ~32 MB to the bundle and runs entirely on ONNX Runtime, no torch.
+
+    Args:
+        segmentation_model: HF repo id for pyannote-segmentation-3.0 ONNX.
+        embedding_model: HF repo id or alias for the speaker embedder.
+        segmentation_path: optional local dir override for the segmentation model.
+        embedding_path: optional local dir override for the embedding model.
+        quantization: ORT quantization tier (``None`` | ``int8`` | ...).
+        sess_options: optional ORT SessionOptions.
+        providers: optional ORT execution providers.
+        provider_options: optional provider_options.
+        progress_callback: download progress hook.
+        **diarizer_kwargs: forwarded to :class:`~onnx_asr.diarization.Diarizer`
+            (``onset``, ``offset``, ``min_segment_duration`` …).
+
+    Returns:
+        A ready-to-use :class:`~onnx_asr.diarization.Diarizer`.
+
+    Example:
+        >>> import onnx_asr
+        >>> diar = onnx_asr.load_diarizer()
+        >>> segments = diar.diarize(audio_float32, sample_rate=16_000)
+        >>> for seg in segments:
+        ...     print(seg.start, seg.end, seg.speaker)
+    """
+    manager = Manager(sess_options, providers, provider_options)
+    return manager.create_diarizer(
+        segmentation_model=segmentation_model,
+        embedding_model=embedding_model,
+        segmentation_path=segmentation_path,
+        embedding_path=embedding_path,
+        quantization=quantization,
+        progress_callback=progress_callback,
+        **diarizer_kwargs,
+    )
+
+
+def load_session_diarizer(
+    *,
+    segmentation_model: str = "onnx-community/pyannote-segmentation-3.0",
+    embedding_model: str = "wespeaker-voxceleb-resnet34-LM",
+    segmentation_path: str | Path | None = None,
+    embedding_path: str | Path | None = None,
+    quantization: str | None = None,
+    sess_options: rt.SessionOptions | None = None,
+    providers: Sequence[str | Provider | tuple[str | Provider, dict[Any, Any]]] | None = None,
+    provider_options: Sequence[dict[Any, Any]] | None = None,
+    progress_callback: ProgressCallback | None = None,
+    max_speakers: int = 20,
+    delta_new: float = 0.5,
+    rho_update: float = 0.3,
+    ema_alpha: float = 0.5,
+    **diarizer_kwargs: float,
+) -> SessionDiarizer:
+    """Load a session diarizer with persistent across-utterance speaker tracking.
+
+    Convenience wrapper: builds a stateless :class:`~onnx_asr.diarization.Diarizer`
+    via :func:`load_diarizer` and wraps it in a :class:`~onnx_asr.diarization.SessionDiarizer`
+    so successive :meth:`~onnx_asr.diarization.SessionDiarizer.diarize` calls
+    share an :class:`~onnx_asr.diarization.OnlineSpeakerClustering` state.
+
+    See :class:`~onnx_asr.diarization.OnlineSpeakerClustering` for ``max_speakers``,
+    ``delta_new``, ``rho_update``, ``ema_alpha``. Remaining kwargs flow to
+    :func:`load_diarizer`.
+    """
+    diarizer = load_diarizer(
+        segmentation_model=segmentation_model,
+        embedding_model=embedding_model,
+        segmentation_path=segmentation_path,
+        embedding_path=embedding_path,
+        quantization=quantization,
+        sess_options=sess_options,
+        providers=providers,
+        provider_options=provider_options,
+        progress_callback=progress_callback,
+        **diarizer_kwargs,
+    )
+    return SessionDiarizer(
+        diarizer,
+        max_speakers=max_speakers,
+        delta_new=delta_new,
+        rho_update=rho_update,
+        ema_alpha=ema_alpha,
     )
 
 

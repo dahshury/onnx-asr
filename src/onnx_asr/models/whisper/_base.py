@@ -101,6 +101,13 @@ class _Whisper(BaseAsr):
             dtype=np.int64,
         )
         self._detect_lang_input = np.array([[self._bos_token_id]], dtype=np.int64)
+        # English-only ``.en`` exports drop the language-detect prompt slot
+        # entirely. They still carry ``<|en|>`` for ID compatibility, but
+        # writing it (or any other language token) into prompt position 1
+        # corrupts the prompt and silently produces empty / garbled output.
+        # Use the multilingual marker ``<|fr|>`` (present iff the export is
+        # multilingual) to disambiguate without depending on exact vocab size.
+        self._is_multilingual: bool = "<|fr|>" in self._tokens
         # Timestamp tokens occupy a contiguous range starting at ``<|0.00|>`` with a 0.02 s step.
         # When ``return_timestamps=True`` we drop ``<|notimestamps|>`` from the prompt so the
         # decoder can emit segment timestamp tokens.
@@ -262,11 +269,18 @@ class _Whisper(BaseAsr):
 
         language_raw = kwargs.get("language")
         language = str(language_raw) if isinstance(language_raw, str) else None
-        if language:
-            input_tokens[:, 1] = self._tokens[f"<|{language}|>"]
+        if self._is_multilingual:
+            if language:
+                lang_token = self._tokens.get(f"<|{language}|>")
+                if lang_token is not None:
+                    input_tokens[:, 1] = lang_token
+            else:
+                input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
+                input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
         else:
-            input_tokens_detect_lang = np.repeat(self._detect_lang_input, len(waveforms), axis=0)
-            input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
+            # English-only export: caller's ``language`` kwarg is ignored to
+            # avoid corrupting prompt position 1 (see :attr:`_is_multilingual`).
+            language = "en"
 
         prompt_length = int(input_tokens.shape[1])
         num_audio_frames = int(waveforms_len[0]) // 160  # HOP_LENGTH = 160
@@ -316,11 +330,14 @@ class _Whisper(BaseAsr):
         input_encoding = self._encode(wf, wf_len)
         prompt = self._transcribe_input_with_timestamps if with_timestamps else self._transcribe_input
         input_tokens = np.repeat(prompt, 1, axis=0)
-        if language:
-            input_tokens[:, 1] = self._tokens[f"<|{language}|>"]
-        else:
-            input_tokens_detect_lang = np.repeat(self._detect_lang_input, 1, axis=0)
-            input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
+        if self._is_multilingual:
+            if language:
+                lang_token = self._tokens.get(f"<|{language}|>")
+                if lang_token is not None:
+                    input_tokens[:, 1] = lang_token
+            else:
+                input_tokens_detect_lang = np.repeat(self._detect_lang_input, 1, axis=0)
+                input_tokens[:, 1] = self._decoding(input_encoding, input_tokens_detect_lang, 3)[:, 1]
 
         output = self._decoding(input_encoding, input_tokens)
         token_ids = output[0]
