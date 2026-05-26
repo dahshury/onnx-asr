@@ -12,6 +12,7 @@ from onnx_asr.asr import Asr, Preprocessor
 from onnx_asr.diarization import Diarizer, SessionDiarizer
 from onnx_asr.models.cohere_asr import CohereAsr
 from onnx_asr.models.gigaam import GigaamV2Ctc, GigaamV2Rnnt, GigaamV3E2eCtc, GigaamV3E2eRnnt
+from onnx_asr.models.granite_speech import GraniteSpeech
 from onnx_asr.models.kaldi import KaldiTransducer
 from onnx_asr.models.moonshine import Moonshine
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
@@ -25,6 +26,7 @@ from onnx_asr.onnx import OnnxSessionOptions, Provider, get_onnx_providers, upda
 from onnx_asr.preprocessors.numpy_preprocessor import (
     CohereAsrPreprocessorNumpy,
     GigaamPreprocessorNumpy,
+    GraniteSpeechPreprocessorNumpy,
     KaldiPreprocessorNumpy,
     NemoPreprocessorNumpy,
     WhisperPreprocessorNumpy,
@@ -69,6 +71,7 @@ AsrNames = Literal[
     "moonshine-base-ja",
     "moonshine-base-ko",
     "cohere-transcribe",
+    "granite-4.0-1b-speech",
 ]
 """Supported ASR model names (can be automatically downloaded from the Hugging Face)."""
 
@@ -84,6 +87,7 @@ AsrTypeNames = Literal[
     "whisper",
     "moonshine",
     "cohere_asr",
+    "granite_speech",
 ]
 """Supported ASR model types."""
 
@@ -105,6 +109,7 @@ AsrTypes: TypeAlias = (
     CohereAsr
     | GigaamV2Ctc
     | GigaamV2Rnnt
+    | GraniteSpeech
     | KaldiTransducer
     | Moonshine
     | NemoConformerCtc
@@ -175,6 +180,13 @@ def create_asr_resolver(
         # ``model_repos``.
         "cohere_asr": CohereAsr,
         "cohere-transcribe": CohereAsr,
+        # IBM Granite Speech (Conformer audio encoder + Q-Former projector +
+        # Granite LLM decoder). The same class transparently handles future
+        # variants (e.g. ``granite-speech-4.1-2b``) — config.json's
+        # ``model_type`` is the stable ``granite_speech`` discriminator;
+        # ``granite-4.0-1b-speech`` is the user-facing shortname.
+        "granite_speech": GraniteSpeech,
+        "granite-4.0-1b-speech": GraniteSpeech,
         "alphacep/vosk-model-ru": KaldiTransducer,
         "alphacep/vosk-model-small-ru": KaldiTransducer,
         "t-tech/t-one": TOneCtc,
@@ -287,6 +299,8 @@ class Manager:
             return WhisperPreprocessorNumpy(name)
         if name.startswith("cohere_asr"):
             return CohereAsrPreprocessorNumpy(name)
+        if name.startswith("granite_speech"):
+            return GraniteSpeechPreprocessorNumpy(name)
         raise ModelNotSupportedError(name)
 
     def _create_preprocessor(self, name: str) -> Preprocessor:
@@ -294,11 +308,12 @@ class Manager:
             return IdentityPreprocessor()
 
         preprocessor: Preprocessor
-        # The Cohere preprocessor has no ONNX twin baked into the wheel (the
-        # npz only carries the shared 128-mel slaney filterbank). Force the
-        # NumPy path regardless of EP — the cost is negligible vs the 2 B
-        # encoder it feeds.
-        if name.startswith("cohere_asr") or self.use_numpy_preprocessors:
+        # The Cohere/Granite preprocessors have no ONNX twin baked into the
+        # wheel (the npz only carries pre-shipped filterbanks; Granite's
+        # torchaudio-default htk fbank is built at runtime). Force the NumPy
+        # path regardless of EP — the cost is negligible vs the multi-billion-
+        # parameter encoders these models feed.
+        if name.startswith(("cohere_asr", "granite_speech")) or self.use_numpy_preprocessors:
             preprocessor = self._build_numpy_preprocessor(name)
         else:
             preprocessor = OnnxPreprocessor(name, self.preprocessor_config)

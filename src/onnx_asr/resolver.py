@@ -45,6 +45,10 @@ model_repos = {
     "moonshine-base-ja": "onnx-community/moonshine-base-ja-ONNX",
     "moonshine-base-ko": "onnx-community/moonshine-base-ko-ONNX",
     "cohere-transcribe": "onnx-community/cohere-transcribe-03-2026-ONNX",
+    # IBM Granite Speech — Conformer audio encoder + Q-Former projector +
+    # Granite LLM decoder. The 4.0-1b release lands at this onnx-community
+    # repo; future granite_speech variants get their own aliases here.
+    "granite-4.0-1b-speech": "onnx-community/granite-4.0-1b-speech-ONNX",
     "silero": "istupakov/silero-vad-onnx",
     # Speaker-embedding model used by the diarizer (CC-BY-4.0; VoxCeleb-trained).
     "wespeaker-voxceleb-resnet34-LM": "Wespeaker/wespeaker-voxceleb-resnet34-LM",

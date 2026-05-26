@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib.resources import as_file, files
+from typing import ClassVar
 
 import numpy as np
 import numpy.typing as npt
@@ -290,6 +291,115 @@ class CohereAsrPreprocessorNumpy(_NumpyPreprocessor):
         features = np.where(mask, (log_mel_spectrogram - mean) / (np.sqrt(var) + self._norm_eps), 0.0)
         # Encoder consumes (batch, T, 128) — already in time-first orientation.
         return features.astype(np.float32, copy=False), features_lens
+
+
+class GraniteSpeechPreprocessorNumpy:
+    """IBM Granite Speech preprocessor implementation in NumPy.
+
+    Mirrors HuggingFace ``GraniteSpeechFeatureExtractor`` (transformers
+    main @ commit 2025-11) for the ``onnx-community/granite-*-speech-ONNX``
+    family:
+
+    1. ``MelSpectrogram(sr=16000, n_fft=512, win_length=400, hop_length=160,
+       n_mels=80)`` via ``torchaudio`` defaults — htk mel scale, no
+       normalisation, power=2.0, center=True (reflect-padded).
+    2. Whisper-style log-magnitude normalisation:
+       ``log10(max(mel, 1e-10)) → clip(min=max-8) → /4 + 1``. Same formula as
+       :class:`WhisperPreprocessorNumpy` — but **without** Whisper's trailing
+       30 s pad/truncate (Granite supports variable-length input).
+    3. Drop the last frame if the mel length is odd, then reshape
+       ``(B, T_mel, 80) → (B, T_mel // 2, 160)`` — the audio encoder ingests
+       two stacked mel frames per timestep.
+
+    Filterbank is built **on the fly** from the canonical torchaudio formula
+    (htk scale, ``linspace`` in mel space, no slaney norm) — none of the
+    existing entries in the wheel's ``fbanks.npz`` match torchaudio's defaults
+    at ``n_fft=512`` exactly. The matrix is 80 x 257 float32 — trivial cost
+    at init.
+
+    Output shape: ``(B, T_mel // 2, 160)`` float32, plus per-row feature
+    lengths in the same units.
+    """
+
+    _sample_rate: ClassVar[int] = 16_000
+    _n_fft: ClassVar[int] = 512
+    _win_length: ClassVar[int] = 400
+    _hop_length: ClassVar[int] = 160
+    _n_mels: ClassVar[int] = 80
+    _clamp_min: ClassVar[float] = 1e-10
+
+    def __init__(self, name: str) -> None:  # noqa: D107
+        assert name == "granite_speech_80mel"
+        # Build the torchaudio-default htk mel filterbank programmatically.
+        # Shape: (n_freqs=257, n_mels=80) — column-major mel coefficients per FFT bin.
+        self._melscale_fbanks = self._build_mel_fbanks()
+        # Periodic Hann window of length 400, matching torch.hann_window(periodic=True).
+        self._window = np.hanning(self._win_length + 1)[:-1].astype(np.float32)
+
+    @classmethod
+    def _build_mel_fbanks(cls) -> np.ndarray:
+        """Construct the torchaudio-default htk mel filterbank (no slaney norm).
+
+        Identical formula to ``torchaudio.functional.melscale_fbanks``:
+
+        * ``all_freqs = linspace(0, sample_rate / 2, n_freqs)``
+        * ``mel = 2595 * log10(1 + f/700)`` (htk)
+        * Triangular filters with vertices at every third mel-spaced point
+        * **No** normalisation (torchaudio's ``norm=None``, the
+          ``GraniteSpeechFeatureExtractor`` default).
+        """
+        n_freqs = cls._n_fft // 2 + 1
+        all_freqs = np.linspace(0.0, cls._sample_rate / 2.0, n_freqs)
+        f_min, f_max = 0.0, cls._sample_rate / 2.0
+        m_min = 2595.0 * np.log10(1.0 + f_min / 700.0)
+        m_max = 2595.0 * np.log10(1.0 + f_max / 700.0)
+        m_pts = np.linspace(m_min, m_max, cls._n_mels + 2)
+        f_pts = 700.0 * (10.0 ** (m_pts / 2595.0) - 1.0)
+        f_diff = np.diff(f_pts)
+        # (n_freqs, n_mels+2) slopes from each bin frequency to each mel vertex.
+        slopes = f_pts[None, :] - all_freqs[:, None]
+        down_slopes = -slopes[:, :-2] / f_diff[:-1]
+        up_slopes = slopes[:, 2:] / f_diff[1:]
+        fb = np.maximum(np.zeros_like(down_slopes), np.minimum(down_slopes, up_slopes))
+        return fb.astype(np.float32)
+
+    def __call__(
+        self, waveforms: npt.NDArray[np.float32], waveforms_lens: npt.NDArray[np.int64]
+    ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.int64]]:
+        """Convert waveforms to (B, T_mel // 2, 160) packed mel features."""
+        # torch.stft(..., center=True, pad_mode='reflect') → reflect-pad n_fft//2 each side.
+        padded = np.pad(waveforms, ((0, 0), (self._n_fft // 2, self._n_fft // 2)), mode="reflect")
+        strided_input = np.lib.stride_tricks.sliding_window_view(padded, self._n_fft, axis=1)[:, :: self._hop_length]
+        # ``win_length < n_fft`` ⇒ zero-pad the window symmetrically inside the FFT frame.
+        window = np.pad(
+            self._window,
+            ((self._n_fft - self._win_length) // 2, (self._n_fft - self._win_length) // 2),
+        )
+        windowed = strided_input * window
+        # power=2.0 magnitude spectrogram.
+        spectrogram = np.abs(np.fft.rfft(windowed, self._n_fft)).astype(np.float32) ** 2
+        # Apply mel filterbank: (B, T, n_freqs) @ (n_freqs, n_mels) → (B, T, n_mels).
+        mel = np.matmul(spectrogram, self._melscale_fbanks)
+        # Whisper-style log normalisation (verified against HF source).
+        log_mel = np.log10(np.maximum(mel, self._clamp_min))
+        # max-8 clip is per-utterance (over BOTH time and mel axes).
+        mx = log_mel.max(axis=(1, 2), keepdims=True)
+        log_mel = np.maximum(log_mel, mx - 8.0)
+        log_mel = log_mel / 4.0 + 1.0
+
+        # Drop the last frame if odd so we can stack-by-2 cleanly.
+        if log_mel.shape[1] % 2 == 1:
+            log_mel = log_mel[:, :-1, :]
+
+        # Pack pairs of adjacent mel frames: (B, T_mel, 80) → (B, T_mel // 2, 160).
+        batch_size = log_mel.shape[0]
+        packed = log_mel.reshape(batch_size, -1, 2 * log_mel.shape[-1]).astype(np.float32, copy=False)
+        # Per-row feature length is post-stacking. HF: mel_length = wavlen // hop + 1;
+        # encoder_length = mel_length // 2. We emit encoder_length (which is what
+        # the audio_encoder graph ingests as its time dimension).
+        mel_lens = (waveforms_lens // self._hop_length + 1).astype(np.int64)
+        encoder_lens = (mel_lens // 2).astype(np.int64)
+        return packed, encoder_lens
 
 
 class WhisperPreprocessorNumpy(_NumpyPreprocessor):
