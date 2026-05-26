@@ -44,6 +44,7 @@ model_repos = {
     "moonshine-base-zh": "onnx-community/moonshine-base-zh-ONNX",
     "moonshine-base-ja": "onnx-community/moonshine-base-ja-ONNX",
     "moonshine-base-ko": "onnx-community/moonshine-base-ko-ONNX",
+    "cohere-transcribe": "onnx-community/cohere-transcribe-03-2026-ONNX",
     "silero": "istupakov/silero-vad-onnx",
     # Speaker-embedding model used by the diarizer (CC-BY-4.0; VoxCeleb-trained).
     "wespeaker-voxceleb-resnet34-LM": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
