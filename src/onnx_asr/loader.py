@@ -12,6 +12,7 @@ from onnx_asr.asr import Asr, Preprocessor
 from onnx_asr.diarization import Diarizer, SessionDiarizer
 from onnx_asr.models.gigaam import GigaamV2Ctc, GigaamV2Rnnt, GigaamV3E2eCtc, GigaamV3E2eRnnt
 from onnx_asr.models.kaldi import KaldiTransducer
+from onnx_asr.models.moonshine import Moonshine
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
 from onnx_asr.models.openwakeword import OpenWakeWord
 from onnx_asr.models.pyannote import PyAnnoteVad
@@ -55,6 +56,16 @@ AsrNames = Literal[
     "alphacep/vosk-model-small-ru",
     "t-tech/t-one",
     "whisper-base",
+    "moonshine-tiny",
+    "moonshine-base",
+    "moonshine-tiny-zh",
+    "moonshine-tiny-ja",
+    "moonshine-tiny-ko",
+    "moonshine-tiny-ar",
+    "moonshine-tiny-vi",
+    "moonshine-base-zh",
+    "moonshine-base-ja",
+    "moonshine-base-ko",
 ]
 """Supported ASR model names (can be automatically downloaded from the Hugging Face)."""
 
@@ -68,6 +79,7 @@ AsrTypeNames = Literal[
     "vosk",
     "whisper-ort",
     "whisper",
+    "moonshine",
 ]
 """Supported ASR model types."""
 
@@ -89,6 +101,7 @@ AsrTypes: TypeAlias = (
     GigaamV2Ctc
     | GigaamV2Rnnt
     | KaldiTransducer
+    | Moonshine
     | NemoConformerCtc
     | NemoConformerRnnt
     | NemoConformerAED
@@ -138,6 +151,19 @@ def create_asr_resolver(
         # the suppression mask) but the I/O contract is the same.
         "lite-whisper": WhisperHf,
         "distil-whisper": WhisperHf,
+        # Moonshine — bare aliases (resolver hits the dict before parsing
+        # config.json) plus the ``model_type`` reported by every variant.
+        "moonshine": Moonshine,
+        "moonshine-tiny": Moonshine,
+        "moonshine-base": Moonshine,
+        "moonshine-tiny-zh": Moonshine,
+        "moonshine-tiny-ja": Moonshine,
+        "moonshine-tiny-ko": Moonshine,
+        "moonshine-tiny-ar": Moonshine,
+        "moonshine-tiny-vi": Moonshine,
+        "moonshine-base-zh": Moonshine,
+        "moonshine-base-ja": Moonshine,
+        "moonshine-base-ko": Moonshine,
         "alphacep/vosk-model-ru": KaldiTransducer,
         "alphacep/vosk-model-small-ru": KaldiTransducer,
         "t-tech/t-one": TOneCtc,

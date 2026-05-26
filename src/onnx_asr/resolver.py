@@ -31,6 +31,19 @@ model_repos = {
     "nemo-parakeet-tdt-0.6b-v3": "istupakov/parakeet-tdt-0.6b-v3-onnx",
     "nemo-canary-1b-v2": "istupakov/canary-1b-v2-onnx",
     "whisper-base": "istupakov/whisper-base-onnx",
+    # Moonshine ASR (Useful Sensors) — tiny / base + per-language variants. Each
+    # checkpoint is already language-specialized at training time, so we route
+    # each short alias to its own repo.
+    "moonshine-tiny": "onnx-community/moonshine-tiny-ONNX",
+    "moonshine-base": "onnx-community/moonshine-base-ONNX",
+    "moonshine-tiny-zh": "onnx-community/moonshine-tiny-zh-ONNX",
+    "moonshine-tiny-ja": "onnx-community/moonshine-tiny-ja-ONNX",
+    "moonshine-tiny-ko": "onnx-community/moonshine-tiny-ko-ONNX",
+    "moonshine-tiny-ar": "onnx-community/moonshine-tiny-ar-ONNX",
+    "moonshine-tiny-vi": "onnx-community/moonshine-tiny-vi-ONNX",
+    "moonshine-base-zh": "onnx-community/moonshine-base-zh-ONNX",
+    "moonshine-base-ja": "onnx-community/moonshine-base-ja-ONNX",
+    "moonshine-base-ko": "onnx-community/moonshine-base-ko-ONNX",
     "silero": "istupakov/silero-vad-onnx",
     # Speaker-embedding model used by the diarizer (CC-BY-4.0; VoxCeleb-trained).
     "wespeaker-voxceleb-resnet34-LM": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
