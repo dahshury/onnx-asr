@@ -10,6 +10,7 @@ import onnxruntime as rt
 from onnx_asr.adapters import SeAdapter, TextResultsAsrAdapter
 from onnx_asr.asr import Asr, Preprocessor
 from onnx_asr.diarization import Diarizer, SessionDiarizer
+from onnx_asr.models.cohere_asr import CohereAsr
 from onnx_asr.models.gigaam import GigaamV2Ctc, GigaamV2Rnnt, GigaamV3E2eCtc, GigaamV3E2eRnnt
 from onnx_asr.models.kaldi import KaldiTransducer
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
@@ -21,6 +22,7 @@ from onnx_asr.models.wespeaker import WespeakerEmbeddings
 from onnx_asr.models.whisper import WhisperHf, WhisperOrt
 from onnx_asr.onnx import OnnxSessionOptions, Provider, get_onnx_providers, update_onnx_providers
 from onnx_asr.preprocessors.numpy_preprocessor import (
+    CohereAsrPreprocessorNumpy,
     GigaamPreprocessorNumpy,
     KaldiPreprocessorNumpy,
     NemoPreprocessorNumpy,
@@ -55,6 +57,7 @@ AsrNames = Literal[
     "alphacep/vosk-model-small-ru",
     "t-tech/t-one",
     "whisper-base",
+    "cohere-transcribe",
 ]
 """Supported ASR model names (can be automatically downloaded from the Hugging Face)."""
 
@@ -68,6 +71,7 @@ AsrTypeNames = Literal[
     "vosk",
     "whisper-ort",
     "whisper",
+    "cohere_asr",
 ]
 """Supported ASR model types."""
 
@@ -86,7 +90,8 @@ WakeWordTypeNames = Literal["openwakeword"]
 WakeWordTypes: TypeAlias = OpenWakeWord
 
 AsrTypes: TypeAlias = (
-    GigaamV2Ctc
+    CohereAsr
+    | GigaamV2Ctc
     | GigaamV2Rnnt
     | KaldiTransducer
     | NemoConformerCtc
@@ -138,6 +143,12 @@ def create_asr_resolver(
         # the suppression mask) but the I/O contract is the same.
         "lite-whisper": WhisperHf,
         "distil-whisper": WhisperHf,
+        # Cohere Transcribe (2B Conformer + lightweight Transformer decoder).
+        # ``cohere_asr`` is what config.json's ``model_type`` reports; the
+        # ``cohere-transcribe`` alias is the user-facing shortname mirrored in
+        # ``model_repos``.
+        "cohere_asr": CohereAsr,
+        "cohere-transcribe": CohereAsr,
         "alphacep/vosk-model-ru": KaldiTransducer,
         "alphacep/vosk-model-small-ru": KaldiTransducer,
         "t-tech/t-one": TOneCtc,
@@ -239,22 +250,30 @@ class Manager:
             )
         self.resampler_config = resampler_config
 
+    def _build_numpy_preprocessor(self, name: str) -> Preprocessor:
+        if name.startswith("gigaam"):
+            return GigaamPreprocessorNumpy(name)
+        if name in ("kaldi", "wespeaker"):
+            return KaldiPreprocessorNumpy(name)
+        if name.startswith("nemo"):
+            return NemoPreprocessorNumpy(name)
+        if name.startswith("whisper"):
+            return WhisperPreprocessorNumpy(name)
+        if name.startswith("cohere_asr"):
+            return CohereAsrPreprocessorNumpy(name)
+        raise ModelNotSupportedError(name)
+
     def _create_preprocessor(self, name: str) -> Preprocessor:
         if name == "identity":
             return IdentityPreprocessor()
 
         preprocessor: Preprocessor
-        if self.use_numpy_preprocessors:
-            if name.startswith("gigaam"):
-                preprocessor = GigaamPreprocessorNumpy(name)
-            elif name in ("kaldi", "wespeaker"):
-                preprocessor = KaldiPreprocessorNumpy(name)
-            elif name.startswith("nemo"):
-                preprocessor = NemoPreprocessorNumpy(name)
-            elif name.startswith("whisper"):
-                preprocessor = WhisperPreprocessorNumpy(name)
-            else:
-                raise ModelNotSupportedError(name)
+        # The Cohere preprocessor has no ONNX twin baked into the wheel (the
+        # npz only carries the shared 128-mel slaney filterbank). Force the
+        # NumPy path regardless of EP — the cost is negligible vs the 2 B
+        # encoder it feeds.
+        if name.startswith("cohere_asr") or self.use_numpy_preprocessors:
+            preprocessor = self._build_numpy_preprocessor(name)
         else:
             preprocessor = OnnxPreprocessor(name, self.preprocessor_config)
 

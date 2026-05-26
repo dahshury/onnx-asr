@@ -31,6 +31,7 @@ model_repos = {
     "nemo-parakeet-tdt-0.6b-v3": "istupakov/parakeet-tdt-0.6b-v3-onnx",
     "nemo-canary-1b-v2": "istupakov/canary-1b-v2-onnx",
     "whisper-base": "istupakov/whisper-base-onnx",
+    "cohere-transcribe": "onnx-community/cohere-transcribe-03-2026-ONNX",
     "silero": "istupakov/silero-vad-onnx",
     # Speaker-embedding model used by the diarizer (CC-BY-4.0; VoxCeleb-trained).
     "wespeaker-voxceleb-resnet34-LM": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
