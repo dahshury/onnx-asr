@@ -19,6 +19,7 @@ from onnx_asr.models.moonshine import Moonshine
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
 from onnx_asr.models.openwakeword import OpenWakeWord
 from onnx_asr.models.pyannote import PyAnnoteVad
+from onnx_asr.models.sense_voice import SenseVoiceCtc
 from onnx_asr.models.silero import SileroVad
 from onnx_asr.models.tone import TOneCtc
 from onnx_asr.models.wespeaker import WespeakerEmbeddings
@@ -78,6 +79,7 @@ AsrNames = Literal[
     "dolphin-base-ctc",
     "dolphin-small-ctc",
     "zipformer-en",
+    "sense-voice-small",
 ]
 """Supported ASR model names (can be automatically downloaded from the Hugging Face)."""
 
@@ -96,6 +98,7 @@ AsrTypeNames = Literal[
     "granite_speech",
     "dolphin-ctc",
     "icefall-zipformer",
+    "sense-voice",
 ]
 """Supported ASR model types."""
 
@@ -125,6 +128,7 @@ AsrTypes: TypeAlias = (
     | NemoConformerCtc
     | NemoConformerRnnt
     | NemoConformerAED
+    | SenseVoiceCtc
     | TOneCtc
     | WhisperHf
     | WhisperOrt
@@ -212,6 +216,13 @@ def create_asr_resolver(
         "alphacep/vosk-model-ru": KaldiTransducer,
         "alphacep/vosk-model-small-ru": KaldiTransducer,
         "t-tech/t-one": TOneCtc,
+        # FunAudioLLM SenseVoice — multilingual CTC with its own FBANK+LFR+CMVN
+        # front-end. The sherpa-onnx repo ships no config.json, so the resolver
+        # matches by the full repo path (like the Vosk / T-one packs above);
+        # ``sense-voice`` / ``sense-voice-small`` are the user-facing aliases.
+        "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17": SenseVoiceCtc,
+        "sense-voice": SenseVoiceCtc,
+        "sense-voice-small": SenseVoiceCtc,
     }
     return Resolver(model_types, model, local_dir, offline=offline, progress_callback=progress_callback)
 

@@ -144,7 +144,7 @@ class _Whisper(BaseAsr):
     ) -> npt.NDArray[np.int64]: ...
 
     def _decode_text(self, tokens: npt.NDArray[np.int64] | list[int]) -> str:
-        text = "".join(token for id in tokens if (token := self._vocab[int(id)]) and not token.startswith("<|"))
+        text = "".join(token for id in tokens if (token := self._vocab.get(int(id))) and not token.startswith("<|"))
         return bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace").removeprefix(" ")
 
     def _decode_tokens(self, tokens: npt.NDArray[np.int64]) -> TimestampedResult:
@@ -220,7 +220,7 @@ class _Whisper(BaseAsr):
         relies on that leading space to know where one word ends and the
         next begins, so this variant preserves it.
         """
-        text = "".join(token for id in tokens if (token := self._vocab[int(id)]) and not token.startswith("<|"))
+        text = "".join(token for id in tokens if (token := self._vocab.get(int(id))) and not token.startswith("<|"))
         return bytearray([self._byte_decoder[c] for c in text]).decode("utf-8", errors="replace")
 
     def _align_word_timestamps(

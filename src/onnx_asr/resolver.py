@@ -61,6 +61,9 @@ model_repos = {
     "dolphin-small-ctc": "csukuangfj/sherpa-onnx-dolphin-small-ctc-multi-lang-int8-2025-04-02",
     # icefall / sherpa-onnx offline Zipformer transducer packs.
     "zipformer-en": "csukuangfj/sherpa-onnx-zipformer-en-2023-06-26",
+    # FunAudioLLM SenseVoice (sherpa-onnx multilingual CTC export). The repo
+    # ships both ``model.onnx`` and ``model.int8.onnx`` + ``tokens.txt``.
+    "sense-voice-small": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
     "silero": "istupakov/silero-vad-onnx",
     # Speaker-embedding model used by the diarizer (CC-BY-4.0; VoxCeleb-trained).
     "wespeaker-voxceleb-resnet34-LM": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
