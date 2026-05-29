@@ -44,11 +44,23 @@ model_repos = {
     "moonshine-base-zh": "onnx-community/moonshine-base-zh-ONNX",
     "moonshine-base-ja": "onnx-community/moonshine-base-ja-ONNX",
     "moonshine-base-ko": "onnx-community/moonshine-base-ko-ONNX",
+    # transformers>=4.57 re-exports (Apr 2026) — declare attention-mask inputs
+    # the Moonshine adapter now feeds. Only uk + fr are ONNX-converted so far
+    # (es exists upstream only as safetensors).
+    "moonshine-tiny-uk": "onnx-community/moonshine-tiny-uk-ONNX",
+    "moonshine-tiny-fr": "onnx-community/moonshine-tiny-fr-ONNX",
     "cohere-transcribe": "onnx-community/cohere-transcribe-03-2026-ONNX",
     # IBM Granite Speech — Conformer audio encoder + Q-Former projector +
     # Granite LLM decoder. The 4.0-1b release lands at this onnx-community
     # repo; future granite_speech variants get their own aliases here.
     "granite-4.0-1b-speech": "onnx-community/granite-4.0-1b-speech-ONNX",
+    # DataoceanAI Dolphin (sherpa-onnx CTC export) — int8 repos are the default
+    # (the int8 repo ships only ``model.int8.onnx``, so catalog entries select
+    # quantization="int8").
+    "dolphin-base-ctc": "csukuangfj/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02",
+    "dolphin-small-ctc": "csukuangfj/sherpa-onnx-dolphin-small-ctc-multi-lang-int8-2025-04-02",
+    # icefall / sherpa-onnx offline Zipformer transducer packs.
+    "zipformer-en": "csukuangfj/sherpa-onnx-zipformer-en-2023-06-26",
     "silero": "istupakov/silero-vad-onnx",
     # Speaker-embedding model used by the diarizer (CC-BY-4.0; VoxCeleb-trained).
     "wespeaker-voxceleb-resnet34-LM": "Wespeaker/wespeaker-voxceleb-resnet34-LM",

@@ -89,3 +89,30 @@ class KaldiTransducer(_AsrWithTransducerDecoding[_STATE_TYPE]):
         (logit,) = self._joiner.run(["logit"], {"encoder_out": encoder_out[None, :], "decoder_out": decoder_out})
         assert is_float32_array(logit)
         return np.squeeze(logit), -1, prev_state
+
+
+class IcefallZipformer(KaldiTransducer):
+    """icefall / sherpa-onnx offline Zipformer transducer.
+
+    Runtime-identical to the Vosk :class:`KaldiTransducer` (same ``x`` /
+    ``x_lens`` encoder I/O, same ``encoder_out`` + ``decoder_out`` → ``logit``
+    joiner, same stateless 2-token-context decoder, same 80-dim kaldi fbank,
+    same ``tokens.txt`` vocab). The only difference is the **file layout**:
+    the published ``k2-fsa/sherpa-onnx`` zipformer packs ship the three graphs
+    at the repo root with an ``-epoch-N-avg-M`` training suffix
+    (``encoder-epoch-99-avg-1.onnx`` …) rather than the Vosk ``*/encoder.onnx``
+    convention — so we only override the file globs.
+
+    ``quantization="int8"`` selects ``*-epoch-*.int8.onnx`` siblings when a
+    repo ships them; otherwise leave it unset (most packs ship one precision).
+    """
+
+    @staticmethod
+    def _get_model_files(quantization: str | None = None) -> dict[str, str]:
+        suffix = "?" + quantization if quantization else ""
+        return {
+            "encoder": f"encoder-*{suffix}.onnx",
+            "decoder": f"decoder-*{suffix}.onnx",
+            "joiner": f"joiner-*{suffix}.onnx",
+            "vocab": "tokens.txt",
+        }

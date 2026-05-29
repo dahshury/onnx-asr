@@ -102,6 +102,26 @@ class Moonshine(BaseAsr):
         self._decoder = rt.InferenceSession(model_files["decoder"], **onnx_options)
         self._decoder_with_past = rt.InferenceSession(model_files["decoder_with_past"], **onnx_options)
 
+        # transformers >= 4.57 re-exports (e.g. ``onnx-community/moonshine-tiny-{uk,fr}-ONNX``,
+        # Apr 2026) declare explicit attention-mask inputs the original 3-graph
+        # layout omitted, and ORT rejects a run that doesn't feed every declared
+        # input. Detect the names so we can supply all-ones masks; the older
+        # exports (tiny/base + zh/ja/ko/ar/vi) don't declare them and are fed
+        # exactly as before — this stays backward-compatible.
+        self._encoder_mask_name = next((i.name for i in self._encoder.get_inputs() if i.name == "attention_mask"), None)
+        self._decoder_enc_mask_name = next(
+            (i.name for i in self._decoder.get_inputs() if i.name == "encoder_attention_mask"), None
+        )
+        self._past_enc_mask_name = next(
+            (i.name for i in self._decoder_with_past.get_inputs() if i.name == "encoder_attention_mask"), None
+        )
+        # The same re-exports also make the past-step decoder recompute cross-
+        # attention from ``encoder_hidden_states`` every step (the original
+        # layout cached encoder K/V and never re-fed it). Feed it when declared.
+        self._past_enc_hidden_name = next(
+            (i.name for i in self._decoder_with_past.get_inputs() if i.name == "encoder_hidden_states"), None
+        )
+
         # Cached layout of the past-step decoder so we can build / round-trip
         # the KV state without re-querying the session on every decode step.
         self._past_input_names: list[str] = [
@@ -263,17 +283,29 @@ class Moonshine(BaseAsr):
         Moonshine eats the raw waveform — no spectrogram, no padding to
         a fixed window. We pass ``(batch, num_samples)`` straight through.
         """
-        (last_hidden_state,) = self._encoder.run(["last_hidden_state"], {"input_values": waveforms})
+        feeds: dict[str, npt.NDArray[np.float32] | npt.NDArray[np.int64]] = {"input_values": waveforms}
+        if self._encoder_mask_name is not None:
+            feeds[self._encoder_mask_name] = np.ones(waveforms.shape, dtype=np.int64)
+        (last_hidden_state,) = self._encoder.run(["last_hidden_state"], feeds)
         assert is_float32_array(last_hidden_state)
         return last_hidden_state
 
     def _first_decode_step(
-        self, input_ids: npt.NDArray[np.int64], encoder_hidden_states: npt.NDArray[np.float32]
+        self,
+        input_ids: npt.NDArray[np.int64],
+        encoder_hidden_states: npt.NDArray[np.float32],
+        enc_mask: npt.NDArray[np.int64],
     ) -> tuple[npt.NDArray[np.float32], dict[str, npt.NDArray[np.float32]]]:
         """Run ``decoder_model.onnx`` (no past) to seed the KV cache."""
+        feeds: dict[str, npt.NDArray[np.float32] | npt.NDArray[np.int64]] = {
+            "input_ids": input_ids,
+            "encoder_hidden_states": encoder_hidden_states,
+        }
+        if self._decoder_enc_mask_name is not None:
+            feeds[self._decoder_enc_mask_name] = enc_mask
         outputs = self._decoder.run(
             ["logits", *self._present_output_names],
-            {"input_ids": input_ids, "encoder_hidden_states": encoder_hidden_states},
+            feeds,
         )
         logits = outputs[0]
         assert is_float32_array(logits)
@@ -289,10 +321,18 @@ class Moonshine(BaseAsr):
         return logits, state
 
     def _past_decode_step(
-        self, next_token: npt.NDArray[np.int64], state: dict[str, npt.NDArray[np.float32]]
+        self,
+        next_token: npt.NDArray[np.int64],
+        state: dict[str, npt.NDArray[np.float32]],
+        enc_mask: npt.NDArray[np.int64],
+        encoder_hidden_states: npt.NDArray[np.float32],
     ) -> tuple[npt.NDArray[np.float32], dict[str, npt.NDArray[np.float32]]]:
         """Run ``decoder_with_past_model.onnx`` for one autoregressive step."""
         feeds: dict[str, npt.NDArray[np.float32] | npt.NDArray[np.int64]] = {"input_ids": next_token}
+        if self._past_enc_mask_name is not None:
+            feeds[self._past_enc_mask_name] = enc_mask
+        if self._past_enc_hidden_name is not None:
+            feeds[self._past_enc_hidden_name] = encoder_hidden_states
         for name in self._past_input_names:
             feeds[name] = state[name]
         outputs = self._decoder_with_past.run(["logits", *self._past_decoder_present_names()], feeds)
@@ -328,9 +368,13 @@ class Moonshine(BaseAsr):
         and would compound the cost.
         """
         batch_size = int(encoder_hidden_states.shape[0])
+        # All-ones cross-attention mask over the encoder time axis — only fed to
+        # decoder graphs that declare ``encoder_attention_mask`` (newer exports);
+        # a no-op for the original layout. Built once and reused every step.
+        enc_mask = np.ones(encoder_hidden_states.shape[:2], dtype=np.int64)
         # Seed with bos for every row in the batch.
         prompt = np.full((batch_size, 1), self._bos_id, dtype=np.int64)
-        logits, state = self._first_decode_step(prompt, encoder_hidden_states)
+        logits, state = self._first_decode_step(prompt, encoder_hidden_states, enc_mask)
 
         # argmax over the last (and only) decoded step → next token per row.
         next_tokens = logits[:, -1].argmax(axis=-1).astype(np.int64)
@@ -339,7 +383,7 @@ class Moonshine(BaseAsr):
 
         while int(tokens.shape[1]) < max_length and not bool(finished.all()):
             step_in = next_tokens[:, None]
-            logits, state = self._past_decode_step(step_in, state)
+            logits, state = self._past_decode_step(step_in, state, enc_mask, encoder_hidden_states)
             next_tokens = logits[:, -1].argmax(axis=-1).astype(np.int64)
             # Once a row has emitted eos, freeze its emission so downstream
             # batch-stack logic stays well-defined for the (rare) batched calls.

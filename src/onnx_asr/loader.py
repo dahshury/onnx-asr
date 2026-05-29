@@ -11,9 +11,10 @@ from onnx_asr.adapters import SeAdapter, TextResultsAsrAdapter
 from onnx_asr.asr import Asr, Preprocessor
 from onnx_asr.diarization import Diarizer, SessionDiarizer
 from onnx_asr.models.cohere_asr import CohereAsr
+from onnx_asr.models.dolphin import DolphinCtc
 from onnx_asr.models.gigaam import GigaamV2Ctc, GigaamV2Rnnt, GigaamV3E2eCtc, GigaamV3E2eRnnt
 from onnx_asr.models.granite_speech import GraniteSpeech
-from onnx_asr.models.kaldi import KaldiTransducer
+from onnx_asr.models.kaldi import IcefallZipformer, KaldiTransducer
 from onnx_asr.models.moonshine import Moonshine
 from onnx_asr.models.nemo import NemoConformerAED, NemoConformerCtc, NemoConformerRnnt, NemoConformerTdt
 from onnx_asr.models.openwakeword import OpenWakeWord
@@ -70,8 +71,13 @@ AsrNames = Literal[
     "moonshine-base-zh",
     "moonshine-base-ja",
     "moonshine-base-ko",
+    "moonshine-tiny-uk",
+    "moonshine-tiny-fr",
     "cohere-transcribe",
     "granite-4.0-1b-speech",
+    "dolphin-base-ctc",
+    "dolphin-small-ctc",
+    "zipformer-en",
 ]
 """Supported ASR model names (can be automatically downloaded from the Hugging Face)."""
 
@@ -88,6 +94,8 @@ AsrTypeNames = Literal[
     "moonshine",
     "cohere_asr",
     "granite_speech",
+    "dolphin-ctc",
+    "icefall-zipformer",
 ]
 """Supported ASR model types."""
 
@@ -107,9 +115,11 @@ WakeWordTypes: TypeAlias = OpenWakeWord
 
 AsrTypes: TypeAlias = (
     CohereAsr
+    | DolphinCtc
     | GigaamV2Ctc
     | GigaamV2Rnnt
     | GraniteSpeech
+    | IcefallZipformer
     | KaldiTransducer
     | Moonshine
     | NemoConformerCtc
@@ -174,6 +184,8 @@ def create_asr_resolver(
         "moonshine-base-zh": Moonshine,
         "moonshine-base-ja": Moonshine,
         "moonshine-base-ko": Moonshine,
+        "moonshine-tiny-uk": Moonshine,
+        "moonshine-tiny-fr": Moonshine,
         # Cohere Transcribe (2B Conformer + lightweight Transformer decoder).
         # ``cohere_asr`` is what config.json's ``model_type`` reports; the
         # ``cohere-transcribe`` alias is the user-facing shortname mirrored in
@@ -187,6 +199,16 @@ def create_asr_resolver(
         # ``granite-4.0-1b-speech`` is the user-facing shortname.
         "granite_speech": GraniteSpeech,
         "granite-4.0-1b-speech": GraniteSpeech,
+        # DataoceanAI Dolphin — single-graph CTC (40 Eastern languages + 22
+        # Chinese dialects). ``dolphin-ctc`` is the ONNX-metadata model_type;
+        # the size aliases mirror ``model_repos`` and default to the int8 export.
+        "dolphin-ctc": DolphinCtc,
+        "dolphin-base-ctc": DolphinCtc,
+        "dolphin-small-ctc": DolphinCtc,
+        # icefall / sherpa-onnx offline Zipformer transducers (root-level
+        # epoch-suffixed file layout; runtime-identical to the Vosk transducer).
+        "icefall-zipformer": IcefallZipformer,
+        "zipformer-en": IcefallZipformer,
         "alphacep/vosk-model-ru": KaldiTransducer,
         "alphacep/vosk-model-small-ru": KaldiTransducer,
         "t-tech/t-one": TOneCtc,
