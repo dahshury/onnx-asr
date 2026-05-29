@@ -18,6 +18,26 @@ from onnx_asr.utils import StreamingNotSupportedError, log_softmax
 S = TypeVar("S")
 
 
+def _vocab_is_uppercase(vocab: dict[int, str]) -> bool:
+    """Report whether ≳90% of the vocab's cased tokens are UPPERCASE.
+
+    Identifies icefall / Kaldi LibriSpeech BPE vocabularies (e.g.
+    ``sherpa-onnx-zipformer-en``) whose units are all uppercase, so the model
+    can only emit ALL-CAPS text. Special markers (``<blk>`` / ``<sos/eos>`` /
+    ``<unk>`` …) and tokens with no cased letters (digits, ``▁``, CJK) are
+    ignored; a vocab with no cased real tokens returns False.
+    """
+    cased = [
+        t
+        for t in vocab.values()
+        if t.lower() != t.upper() and not (t.startswith("<") and t.endswith(">"))
+    ]
+    if not cased:
+        return False
+    upper = sum(1 for t in cased if t == t.upper())
+    return upper / len(cased) > 0.9
+
+
 @dataclass(frozen=True)
 class WordResult:
     """Word-level alignment result from cross-attention DTW.
@@ -258,6 +278,13 @@ class BaseAsr(Asr):
 class _AsrWithDecoding(BaseAsr):
     DECODE_SPACE_PATTERN = re.compile(r"\A\s|\s\B|(\s)\b")
     window_step = 0.01
+    #: True when the model's vocab is (almost) entirely UPPERCASE \u2014 i.e. an
+    #: icefall / Kaldi LibriSpeech export whose BPE units are uppercase, so the
+    #: model can ONLY emit ALL-CAPS text (e.g. ``sherpa-onnx-zipformer-en``).
+    #: Such transcripts are unusable for dictation; we lowercase them in
+    #: ``_decode_tokens`` (sentence-casing is left to the caller). Detected from
+    #: the vocab \u2014 never flips for mixed/lowercase vocabs (Whisper, NeMo, Vosk).
+    _lowercase_decoded: bool = False
 
     def __init__(
         self,
@@ -275,6 +302,7 @@ class _AsrWithDecoding(BaseAsr):
             self._vocab_size = len(self._vocab)
             if (blank_idx := next((id for id, token in self._vocab.items() if token == "<blk>"), None)) is not None:
                 self._blank_idx = blank_idx
+            self._lowercase_decoded = _vocab_is_uppercase(self._vocab)
 
     @property
     @abstractmethod
@@ -295,6 +323,8 @@ class _AsrWithDecoding(BaseAsr):
     ) -> TimestampedResult:
         tokens = [self._vocab[i] for i in ids]
         text = re.sub(self.DECODE_SPACE_PATTERN, lambda x: " " if x.group(1) else "", "".join(tokens))
+        if self._lowercase_decoded:
+            text = text.lower()
         timestamps = (
             None if indices is None else (self.window_step * self._subsampling_factor * np.asarray(indices)).tolist()
         )
